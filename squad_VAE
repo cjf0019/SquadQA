@@ -32,12 +32,14 @@ CHKPTPATH = str(datetime.date.today()) + '/checkpoints'
 MODE = 'train'
 LOAD_PRETRAINED_FILE = False
 OUTPUT_PREDICTION_FILE = True
+TRAIN_FILE = input_dir + 'squad/train-v2.0.json'
+TEST_FILE = input_dir + 'squad/dev-v2.0.json'
 
 pl.seed_everything(SEED)
 
 
 def run():
-    train_df, val_df = stage_squad_data_pytorch()
+    train_df, val_df = stage_squad_data_pytorch(TRAIN_FILE,TEST_FILE)
 
     data_module = SquadDataModule(
         train_df,

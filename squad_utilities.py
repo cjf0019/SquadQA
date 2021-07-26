@@ -169,9 +169,9 @@ def trained_to_pretrained_weight_check(model,chkptpath):
     return trained, pretrained
 
 
-def stage_squad_data_pytorch():
-    train_ids, train_contexts, train_questions, train_answers = read_squad(input_dir + 'squad/train-v2.0.json')
-    val_ids, val_contexts, val_questions, val_answers = read_squad(input_dir + 'squad/dev-v2.0.json')
+def stage_squad_data_pytorch(train_file,test_file):
+    train_ids, train_contexts, train_questions, train_answers = read_squad(train_file)
+    val_ids, val_contexts, val_questions, val_answers = read_squad(test_file)
 
     add_end_idx(train_answers, train_contexts)
     add_end_idx(val_answers, val_contexts)
