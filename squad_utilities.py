@@ -169,7 +169,20 @@ def trained_to_pretrained_weight_check(model,chkptpath):
     return trained, pretrained
 
 
+def stage_squad_data_pytorch():
+    train_ids, train_contexts, train_questions, train_answers = read_squad(input_dir + 'squad/train-v2.0.json')
+    val_ids, val_contexts, val_questions, val_answers = read_squad(input_dir + 'squad/dev-v2.0.json')
 
+    add_end_idx(train_answers, train_contexts)
+    add_end_idx(val_answers, val_contexts)
+
+    maxlength = get_max_ans_len(train_answers)
+    ### Max answer length is 43, so set to 50, and set Q-context to 512
+
+    train_df = setup_qa_df(train_ids, train_contexts, train_questions, train_answers)
+    val_df = setup_qa_df(val_ids, val_contexts, val_questions, val_answers)
+
+    return train_df, val_df
 
 
 
