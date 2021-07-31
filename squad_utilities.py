@@ -107,7 +107,19 @@ def setup_input_and_run_model(data_module,model,raw_sample=None):
     return example, loss, logits
 
 
-       
+def tokenize_to_dict(tokenizer, text, output_len, text_label=None, make_pad_negative=False):
+    text_label = '' if text_label is None else text_label
+    encodings = tokenizer(text, truncation=True, max_length=output_len, padding="max_length", add_special_tokens=True, return_tensors='pt')
+    if make_pad_negative:
+        input_ids = encodings['input_ids']
+        input_ids[input_ids == 0] = -100
+        encodings['input_ids'] = input_ids
+
+    encodings[(text_label+'_input_ids').lstrip('_')] = encodings.pop('input_ids')
+    encodings[(text_label+'_attention_mask').lstrip('_')] = encodings.pop('attention_mask')
+    return encodings
+
+
 def generate_answers(inputs,seq_len,model,input_col='input_ids',output_col='Ans_Predict',tokenizer=None):
     if tokenizer is not None:      
          inputs = tokenizer(inputs,padding=True,return_tensors="pt")
