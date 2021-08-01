@@ -3,8 +3,8 @@ import torch
 import transformers
 import datasets
 import pytorch_lightning as pl
-from pl_bolts.callbacks import ModuleDataMonitor, TrainingDataMonitor, \
-    BatchGradientVerificationCallback, PrintTableMetricsCallback
+#from pl_bolts.callbacks import ModuleDataMonitor, TrainingDataMonitor, \
+#    BatchGradientVerificationCallback, PrintTableMetricsCallback
 from squad_utilities import process_generated_answer, stage_squad_data_pytorch
 from squad_datasets_datamodules import SquadDataset, SquadDataModule
 from squad_models import SquadModel
@@ -15,7 +15,7 @@ import pandas as pd
 import datetime
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # dont use GPU for now
-input_dir = ".//"
+input_dir = "C:\\Users\\cfavr\\Documents\\Python Scripts\\"
 
 from transformers import T5Tokenizer#, T5Model, T5ForConditionalGeneration
 

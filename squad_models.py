@@ -90,18 +90,33 @@ class SquadModel(pl.LightningModule):
 
 
 class BasicEncoder(nn.Module):
-    def __init__(self, x_dim=512, nhid=16, ncond=0):
+    def __init__(self, x_dim=512, vocab_size=32128, embedding_dim=100, nhid=16, ncond=0, one_hot=True, negative_padding=False):
         super(BasicEncoder, self).__init__()
 
-        self.enc1 = nn.Linear(x_dim, nhid)
+        self.vocab_size = vocab_size
+        self.negative_padding = negative_padding
+        pad_idx = -100 if negative_padding else 0
+        self.one_hot = one_hot
+        if not self.one_hot:
+            self.embed = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
+            self.enc1 = nn.Linear(embedding_dim, nhid)
+        else:
+            self.enc1 = nn.Linear(vocab_size, nhid)
         self.relu = nn.ReLU()
 
         self.calc_mean = nn.Linear(nhid + ncond, 1)
         self.calc_logvar = nn.Linear(nhid + ncond, 1)
 
     def forward(self, x, y=None):
-        x = self.relu(self.enc1(x))
-        if (y is None):
+        if self.one_hot:
+            x = torch.sum(nn.functional.one_hot(x,self.vocab_size).float(), 1)
+            print(x.shape, x)
+            x = self.relu(self.enc1(x))
+        else:
+            x = self.relu(self.enc1(torch.sum(self.embed(x), 1)))
+
+        print(x.shape)
+        if y is None:
             return self.calc_mean(x), self.calc_logvar(x)
         else:
             return self.calc_mean(torch.cat((x, y))), self.calc_logvar(torch.cat((x, y)))
