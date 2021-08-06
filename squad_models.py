@@ -109,7 +109,7 @@ class BasicEncoder(nn.Module):
 
     def forward(self, x, y=None):
         if self.one_hot:
-            x = torch.sum(nn.functional.one_hot(x,self.vocab_size).float(), 1)
+            x = torch.sum(nn.functional.one_hot(x,self.vocab_size).float(), 1)  # for now sum over the one-hot embeddings for one embedding per sample
             print(x.shape, x)
             x = self.relu(self.enc1(x))
         else:
