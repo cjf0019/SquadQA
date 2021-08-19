@@ -93,6 +93,25 @@ class SquadModel(pl.LightningModule):
 class InputProcessor(nn.Module):
     def __init__(self, x_dim=512, vocab_dim=512, vocab_size=32128, embedding_dim=100,
                  one_hot=True, negative_padding=False):
+        """
+        Switch back and forth between a integerized inputs (corresponding to vocab)
+        and embeddings/one-hot.
+
+        FOR ENCODING :
+            INPUT : integer sequences corresponding to sequences of codes/words
+            OUTPUT : embeddings/one-hot vectors (dim of embedding_dim for former, vocab_size for latter)
+
+        FOR DECODING :
+            INPUT : If one_hot, should just be the result of a softmax or sigmoid, of dimension vocab_size,
+                    corresponding to the log-prob of the output being each vocab word.
+                    If embedding, should correspond to a vector in the embedding space, such that
+                        nearest neighbors can be performed with the vector and each vocab embedding
+            OUTPUT : The vocab codes/words corresponding to 1) the most probable for one_hot
+                        or 2) the nearest neighbor embedding for embeddings
+
+        NOTE : Assumes the same embedding weight matrix used for both encoding and decoding
+        """
+
         super(InputProcessor, self).__init__()
 
         self.x_dim = x_dim
@@ -107,8 +126,17 @@ class InputProcessor(nn.Module):
         else:
             embedding_dim = vocab_size
         self.embedding_dim = embedding_dim
+        self.mode = 'encode'
 
-    def forward(self, x, y=None):
+    def forward(self, x):
+        if self.mode == 'encode':
+            return self.encode_(x)
+        elif self.mode == 'decode':
+            return self.decode_(x)
+        else:
+            raise Exception("Received mode of {}. Will only accept 'encode' or 'decode'".format(self.mode))
+
+    def encode_(self, x):
         if self.x_non_vocab_size > 0:
             x, x_nv = torch.split(x, [self.x_dim-self.x_non_vocab_size, self.x_non_vocab_size], -1) # assumes vocab feats are before non vocab feats
 
@@ -123,6 +151,15 @@ class InputProcessor(nn.Module):
             x = torch.cat((x, x_nv))
         return x
 
+    def decode_(self,x):
+        if self.one_hot:
+            x = torch.round(x).int()
+            x = torch.argmax(x,dim=-1)
+            return x    # Returns the batch of integerized sequences
+
+        else:
+            distance = torch.norm(self.embed.weight.data - x, dim=1)
+            nearest = torch.argmin(distance)
 
 
 class BasicEncoder(nn.Module):
