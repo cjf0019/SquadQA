@@ -163,41 +163,16 @@ class InputProcessor(nn.Module):
 
 
 class BasicEncoder(nn.Module):
-    def __init__(self, x_dim=512, vocab_dim=512, vocab_size=32128, embedding_dim=100,
-                 nhid=16, ncond=0, output_dim=16, one_hot=True, negative_padding=False):
+    def __init__(self, x_dim=512, nhid=16, ncond=0, output_dim=16):
         super(BasicEncoder, self).__init__()
 
         self.x_dim = x_dim
-        self.vocab_dim = vocab_dim
-        self.vocab_size = vocab_size
-        self.x_non_vocab_size = x_dim - vocab_size # inputs that aren't in the vocabulary
-        self.negative_padding = negative_padding
-        pad_idx = -100 if negative_padding else 0
-        self.one_hot = one_hot
-        if not self.one_hot:
-            self.embed = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
-        else:
-            embedding_dim = vocab_size
-
-        self.enc1 = nn.Linear(embedding_dim, nhid)
+        self.enc1 = nn.Linear(x_dim, nhid)
         self.relu = nn.ReLU()
         self.calc_mean = nn.Linear(nhid + ncond, output_dim)
         self.calc_logvar = nn.Linear(nhid + ncond, output_dim)
 
     def forward(self, x, y=None):
-        if self.x_non_vocab_size > 0:
-            x, x_nv = torch.split(x, [self.x_dim-self.x_non_vocab_size, self.x_non_vocab_size], -1) # assumes vocab feats are before non vocab feats
-
-        if self.one_hot:
-            x = nn.functional.one_hot(x,self.vocab_size).float()
-            print(x.shape, x)
-        else:
-            x = self.embed(x)
-
-        x = torch.sum(x, 1)
-        if self.x_non_vocab_size > 0:
-            x = torch.cat((x, x_nv))
-
         x = self.relu(self.enc1(x))
         print(x.shape)
         if y is None:
