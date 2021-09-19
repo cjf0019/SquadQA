@@ -196,6 +196,51 @@ class BasicDecoder(nn.Module):
             return torch.sigmoid(torch.cat((x, y)))
 
 
+class ConvolutionalEncoder(nn.Module):
+    def __init__(self, x_dim=(512,32128), output_dim=100, ncond=0):
+        super(ConvolutionalEncoder, self).__init__()
+
+        self.kernel_size = 5
+        self.stride = 2
+        self.dilation = 1
+        self.padding = 0
+        self.x_dim = x_dim  # seq_len x vocab_dim
+        #self.enc1 = nn.Linear(x_dim[1], nhid)
+        self.relu = nn.ReLU()
+        self.conv1 = nn.Conv1d(x.shape[2], 200, self.kernel_size, stride=self.stride)
+        self.conv2 = nn.Conv1d(200, 300, self.kernel_size, stride=self.stride)
+        self.conv3 = nn.Conv1d(300, output_dim, self.kernel_size, stride=self.stride)
+        #self.max_pool2 = nn.MaxPool1d(512)
+
+        linear_dim = self.calc_linear_dim()
+        self.calc_z = nn.Linear(int(linear_dim)+ncond, 2)
+
+    def forward(self, x, y=None):
+        x = x.permute(0, 2, 1)  # batch_size x seq_len x vocab/embed_dim
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        #x = self.max_pool2(x)
+        #x = self.relu(x)
+        print(x.shape)
+        if y is not None:
+            x = torch.cat((x, y))
+
+        mean_var = self.relu(self.calc_z(x))
+        mean, var = mean_var.split(1, dim=-1)
+        return mean.squeeze(), var.squeeze()
+
+    def calc_linear_dim(self):
+        """ calculate the dimension required from last conv layer to use in the subsequent MLP layer"""
+        def calc_lout(l,padding,dilation,ksize,stride):
+            return (l+2*padding-dilation*(ksize-1)-1)/stride + 1
+
+        conv1dim = calc_lout(512,self.padding,self.dilation,self.kernel_size,self.stride)
+        conv2dim = calc_lout(conv1dim,self.padding,self.dilation,self.kernel_size,self.stride)
+        conv3dim = calc_lout(conv2dim, self.padding, self.dilation, self.kernel_size, self.stride)
+        return conv3dim
+
+
 class VAE(nn.Module):
     def __init__(self, shape, nhid=16):
         super(VAE, self).__init__()
