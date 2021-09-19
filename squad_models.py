@@ -207,7 +207,7 @@ class ConvolutionalEncoder(nn.Module):
         self.x_dim = x_dim  # seq_len x vocab_dim
         #self.enc1 = nn.Linear(x_dim[1], nhid)
         self.relu = nn.ReLU()
-        self.conv1 = nn.Conv1d(x.shape[2], 200, self.kernel_size, stride=self.stride)
+        self.conv1 = nn.Conv1d(x_dim[1], 200, self.kernel_size, stride=self.stride)
         self.conv2 = nn.Conv1d(200, 300, self.kernel_size, stride=self.stride)
         self.conv3 = nn.Conv1d(300, output_dim, self.kernel_size, stride=self.stride)
         #self.max_pool2 = nn.MaxPool1d(512)
