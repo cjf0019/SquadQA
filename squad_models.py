@@ -241,6 +241,62 @@ class ConvolutionalEncoder(nn.Module):
         return conv3dim
 
 
+class ConvolutionalDecoder(nn.Module):
+    def __init__(self, output_dim=(512,32128), nhid=100, ncond=0, softmax_temp=0.01):
+        super(ConvolutionalDecoder, self).__init__()
+
+        self.kernel_size = 5
+        self.stride = 2
+        self.dilation = 1
+        self.padding = 0
+        self.output_padding = 0
+        self.output_dim = output_dim  # seq_len x vocab_dim
+        #self.enc1 = nn.Linear(x_dim[1], nhid)
+        self.relu = nn.ReLU()
+        self.linear = nn.Linear(1, 61+ncond)
+        self.conv1 = nn.ConvTranspose1d(nhid, 300, self.kernel_size, stride=self.stride,
+                                        padding=self.padding, output_padding=self.output_padding)
+        self.conv2 = nn.ConvTranspose1d(300, 200, self.kernel_size, stride=self.stride,
+                                        padding=self.padding, output_padding=1)  #getting issues syncing with encoder convs, so adding 1 output padding
+        self.conv3 = nn.ConvTranspose1d(200, output_dim[1], self.kernel_size, stride=self.stride,
+                                        padding=self.padding, output_padding=1)
+        #self.max_pool2 = nn.MaxPool1d(512)
+
+        self.softmax_temp = softmax_temp
+        linear_dim = self.calc_linear_dim()
+        #self.calc_mean = nn.Linear(nhid + ncond, output_dim)
+        #self.calc_logvar = nn.Linear(nhid + ncond, output_dim)
+        #self.calc_z = nn.Linear(int(linear_dim)+ncond, 2)
+
+    def forward(self, x, y=None):
+        #x = x.permute(0, 2, 1)  # batch_size x seq_len x vocab/embed_dim
+        x = x.view((x.shape[0],x.shape[1],1))
+        x = self.linear(x)
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        #x = self.max_pool2(x)
+        #x = self.relu(x)
+        if y is not None:
+            x = torch.cat((x, y))
+
+        # the following softmax assumes one-hot embedding
+        x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
+        #x = torch.div(x,torch.norm(x, dim=1)) #normalize per sequence index
+        x = torch.softmax(x/self.softmax_temp, axis=-1)
+        return x
+
+    def calc_linear_dim(self):
+        """ calculate the dimension required from last conv layer to use in the subsequent MLP layer"""
+        def calc_lout(l,padding,dilation,ksize,stride,output_padding):
+            return (l-1)*stride - 2*padding + dilation*(ksize-1) + output_padding + 1
+
+        conv1dim = calc_lout(61,self.padding,self.dilation,self.kernel_size,self.stride,self.output_padding)
+        conv2dim = calc_lout(conv1dim,self.padding,self.dilation,self.kernel_size,self.stride,self.output_padding)
+        conv3dim = calc_lout(conv2dim, self.padding, self.dilation, self.kernel_size, self.stride,self.output_padding)
+        return conv3dim
+
+
 class VAE(nn.Module):
     def __init__(self, shape, nhid=16):
         super(VAE, self).__init__()
