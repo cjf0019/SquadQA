@@ -297,15 +297,111 @@ class ConvolutionalDecoder(nn.Module):
         return conv3dim
 
 
+class ConvolutionalEncoderDecoder(nn.Module):
+    def __init__(self, x_dim=(512,32128), nhid=100, ncond=0, decoder_softmax_temp=0.01, mode='encode'):
+        super(ConvolutionalEncoderDecoder, self).__init__()
+
+        self.mode = mode
+        # general convolutional parameters
+        self.kernel_size = 5
+        self.stride = 2
+        self.dilation = 1
+        self.padding = 0
+        self.x_dim = x_dim  # seq_len x vocab_dim
+        self.linear_dims = self.calc_linear_dims()
+        #self.output_padding = 0  # only used for decoder... added to right side of convtranspose
+        #self.enc1 = nn.Linear(x_dim[1], nhid)
+        self.relu = nn.ReLU()
+
+        # encoder params
+        self.conv1 = nn.Conv1d(x.shape[2], 200, self.kernel_size, stride=self.stride)
+        self.conv2 = nn.Conv1d(200, 300, self.kernel_size, stride=self.stride)
+        self.conv3 = nn.Conv1d(300, nhid, self.kernel_size, stride=self.stride)
+        self.calc_z = nn.Linear(int(self.linear_dims[0])+ncond, 2)
+
+        # decoder params
+        self.decode_z = nn.Linear(1, self.linear_dims[0] + ncond)
+        self.conv1t = nn.ConvTranspose1d(nhid, 300, self.kernel_size, stride=self.stride,
+                                        padding=self.padding)
+        self.conv2t = nn.ConvTranspose1d(300, 200, self.kernel_size, stride=self.stride,
+                                        padding=self.padding)  # getting issues syncing with encoder convs, so adding 1 output padding
+        self.conv3t = nn.ConvTranspose1d(200, x_dim[1], self.kernel_size, stride=self.stride,
+                                        padding=self.padding, output_padding=self.out_pad)
+
+        self.decoder_softmax_temp = decoder_softmax_temp
+
+    def forward(self, x, y=None):
+        if self.mode == 'encode':
+            return self._encode(x,y)
+        elif self.mode == 'decode':
+            return self._decode(x,y)
+        else:
+            raise Exception("Received mode of {}. Will only accept 'encode' or 'decode'".format(self.mode))
+
+    def _encode(self, x, y=None):
+        x = x.permute(0, 2, 1)  # batch_size x seq_len x vocab/embed_dim
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        if y is not None:
+            x = torch.cat((x, y))
+
+        mean_var = self.relu(self.calc_z(x))
+        mean, var = mean_var.split(1, dim=-1)
+        return mean.squeeze(), var.squeeze()
+
+    def _decode(self, x, y=None):
+        x = x.view((x.shape[0], x.shape[1], 1))  # unflatten hidden layer
+        x = self.decode_z(x)
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        if y is not None:
+            x = torch.cat((x, y))
+
+        # the following softmax assumes one-hot embedding
+        x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
+        #x = torch.div(x,torch.norm(x, dim=1)) #normalize per sequence index
+        x = torch.softmax(x/self.softmax_temp, axis=-1)
+        return x
+
+    def calc_lout_encoder(self, l, padding, dilation, ksize, stride):
+        return (l+2*padding-dilation*(ksize-1)-1)/stride + 1
+
+    def calc_lout_decoder(self, l, padding, dilation, ksize, stride, output_padding):
+        return (l - 1) * stride - 2 * padding + dilation * (ksize - 1) + output_padding + 1
+
+    def calc_linear_dims(self):
+        """ calculate the dimensions required for
+        1) encoder's last conv layer to use in the subsequent MLP layer
+        2) decoders last conv_transpose layer (should be equal to the original input seq length
+        3) output padding (out_pad) to apply to last decoder conv_transpose layer to ensure equality to original seq len
+        """
+        ### Encoder convolutional layers length dimension
+        self.conv1dim = self.calc_lout_encoder(self.x_dim[0],self.padding,self.dilation,self.kernel_size,self.stride)
+        self.conv2dim = self.calc_lout_encoder(self.conv1dim,self.padding,self.dilation,self.kernel_size,self.stride)
+        self.conv3dim = self.calc_lout_encoder(self.conv2dim, self.padding, self.dilation, self.kernel_size, self.stride)
+
+        ### Decoder convolutional layers length dimension
+        self.conv1tdim = self.calc_lout_decoder(int(round(self.conv3dim)),self.padding,self.dilation,self.kernel_size,self.stride,0)
+        self.conv2tdim = self.calc_lout_decoder(self.conv1tdim,self.padding,self.dilation,self.kernel_size,self.stride,0)
+        self.out_pad = int(round(self.conv1dim)) - int(round(self.conv2tdim)) #ensure the resulting dimension mirrors that from the encoder conv operation
+        self.conv3tdim = self.calc_lout_decoder(self.conv2tdim,self.padding,self.dilation,self.kernel_size,self.stride,self.out_pad)
+        return (int(round(self.conv3dim)), int(round(self.conv3tdim)))
+
+
 class VAE(nn.Module):
-    def __init__(self, shape, nhid=16):
+    def __init__(self, shape=(512,32128), nhid=100, device='cpu'):
         super(VAE, self).__init__()
         self.dim = nhid
-        self.encoder = BasicEncoder(shape, nhid)
-        self.decoder = BasicDecoder(shape, nhid)
+        #self.encoder = BasicEncoder(shape, nhid)
+        #self.decoder = BasicDecoder(shape[1], nhid)
+        self.encoder = ConvolutionalEncoder(x_dim=shape,nhid=nhid)
+        self.decoder = ConvolutionalDecoder(output_dim=shape,nhid=nhid)
+        self.device = device
 
     def sampling(self, mean, logvar):
-        eps = torch.randn(mean.shape).to(device)
+        eps = torch.randn(mean.shape).to(self.device)
         sigma = 0.5 * torch.exp(logvar)
         return mean + eps * sigma
 
@@ -315,7 +411,7 @@ class VAE(nn.Module):
         return self.decoder(z), mean, logvar
 
     def generate(self, batch_size=None):
-        z = torch.randn((batch_size, self.dim)).to(device) if batch_size else torch.randn((1, self.dim)).to(device)
+        z = torch.randn((batch_size, self.dim)).to(self.device) if batch_size else torch.randn((1, self.dim)).to(self.device)
         res = self.decoder(z)
         if not batch_size:
             res = res.squeeze(0)
