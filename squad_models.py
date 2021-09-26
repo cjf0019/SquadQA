@@ -353,9 +353,9 @@ class ConvolutionalEncoderDecoder(nn.Module):
     def _decode(self, x, y=None):
         x = x.view((x.shape[0], x.shape[1], 1))  # unflatten hidden layer
         x = self.decode_z(x)
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.relu(self.conv3(x))
+        x = self.relu(self.conv1t(x))
+        x = self.relu(self.conv2t(x))
+        x = self.relu(self.conv3t(x))
         if y is not None:
             x = torch.cat((x, y))
 
