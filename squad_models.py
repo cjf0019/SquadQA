@@ -362,7 +362,7 @@ class ConvolutionalEncoderDecoder(nn.Module):
         # the following softmax assumes one-hot embedding
         x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
         #x = torch.div(x,torch.norm(x, dim=1)) #normalize per sequence index
-        x = torch.softmax(x/self.softmax_temp, axis=-1)
+        x = torch.softmax(x/self.decoder_softmax_temp, axis=-1)
         return x
 
     def calc_lout_encoder(self, l, padding, dilation, ksize, stride):
