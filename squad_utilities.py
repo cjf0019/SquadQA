@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import torch
 from itertools import chain
+import spacy
+import numpy as np
 
 EMBED_DIR = "C:\\Users\\cfavr\\gensim-data\\"
 EMBED_FILE = "glove-wiki-gigaword-300"
@@ -18,37 +20,70 @@ SPACY_MODEL = 'en_core_web_md'
 
 
 class SpacyTokenizer(object):
-    def __init__(self, nlp_file=SPACY_MODEL):
+    def __init__(self, nlp_file=SPACY_MODEL, padding_value=-100):
         self.nlp_file = nlp_file
+        self.padding_value = padding_value
         self.load_spacy_model()
 
     def tokenize(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         doc = self.nlp_model(text)
-        toked = [self.token2id[tok] for tok in doc if tok.has_vector]
-        toked += [0] * (max_length - len(toked))
+        toked = [self.token2id[str(tok)] for tok in doc if tok.has_vector]
+        toked += [self.padding_value] * (max_length - len(toked))
         if return_tensors == 'pt':
             return {'input_ids': torch.tensor(toked, dtype=torch.int64)}
         else:
             return {'input_ids': toked}
 
     def decode(self, ids):
-        return ' '.join([self.id2token[id] for id in ids])
+        return ' '.join([self.id2token[int(id.detach().numpy())] for id in ids if int(id.detach().numpy()) != self.padding_value])
 
     def __call__(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         return self.tokenize(text, max_length=max_length, padding=padding,
                              add_special_tokens=add_special_tokens, return_tensors=return_tensors)
 
+    def __getitem__(self,idx):
+        if idx == self.padding_value:
+            return '<PAD>'
+        return self.id2token[idx]
+
     def load_spacy_model(self,embed_file=None):
         if embed_file is None:
             embed_file = self.nlp_file
+        else:
+            self.nlp_file = embed_file
 
-        self.nlp_model = spacy.load(self.nlp_file)
-        self.weights = torch.FloatTensor(self.nlp_model.vocab.data)
+        self.nlp_model = spacy.load(embed_file)
+        self.weights = torch.FloatTensor(self.nlp_model.vocab.vectors.data)
         self.token2hash = self.nlp_model.vocab.strings
-        self.hash2id = {i: self.nlp_model.vocab.vectors.key2row[i] for i in list(self.nlp_model.vocab.strings)}
-        self.token2id = {string: self.string2hash[self.hash2id[string]] for string in list(self.nlp_model.vocab.strings)}
-        self.hash2token = {i: self.nlp_model.vocab.strings[i] for i in list(self.nlp_model.vocab.strings)}
-        self.vocabulary = len(self.string2id)
+        #self.hash2id = {i: self.nlp_model.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp_model.vocab.strings)
+        #                    if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
+        #self.token2id = {string: self.token2hash[self.hash2id[string]] for string in list(self.nlp_model.vocab.strings)
+        #                 if string in self.nlp_model.vocab.vectors.key2row.keys()}
+        self.token2id = {i: self.nlp_model.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp_model.vocab.strings)
+                        if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
+        self.id2token = {self.nlp_model.vocab.vectors.key2row[self.token2hash[i]]: i for i in list(self.nlp_model.vocab.strings)
+                        if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
+        #self.hash2token = {i: self.nlp_model.vocab.strings[i] for i in list(self.nlp_model.vocab.strings)
+        #                   if i in self.nlp_model.vocab.vectors.key2row.keys()}
+        self.vocabulary = len(self.token2id)
+
+    def get_weight(self,tok):
+        return self.weights[self.token2id[tok]]
+
+    def _norm_weight(self,vec):
+        return np.sqrt(sum(x * x for x in vec))
+
+    def cosine_similarity(self, word1, word2, normalize=True):
+        vec1 = self.get_weight(word1)
+        vec2 = self.get_weight(word2)
+        mult = np.dot(vec1,vec2)
+        norm = 1.0/(self._norm_weight(vec1)*self._norm_weight(vec2)) if normalize else 1.0
+        return mult*norm
+
+    def top_similar(self,word,n=10):
+        topidx = np.dot(tokenizer.weights[self.token2id[word]],tokenizer.weights.T).argsort()[-1*n-1:-1][::-1]
+        return [self.id2token[i] for i in topidx]
+
 
 
 class GensimTokenizer(object):
