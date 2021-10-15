@@ -12,6 +12,76 @@ from pathlib import Path
 import torch
 from itertools import chain
 
+EMBED_DIR = "C:\\Users\\cfavr\\gensim-data\\"
+EMBED_FILE = "glove-wiki-gigaword-300"
+SPACY_MODEL = 'en_core_web_md'
+
+
+class SpacyTokenizer(object):
+    def __init__(self, nlp_file=SPACY_MODEL):
+        self.nlp_file = nlp_file
+        self.load_spacy_model()
+
+    def tokenize(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+        doc = self.nlp_model(text)
+        toked = [self.token2id[tok] for tok in doc if tok.has_vector]
+        toked += [0] * (max_length - len(toked))
+        if return_tensors == 'pt':
+            return {'input_ids': torch.tensor(toked, dtype=torch.int64)}
+        else:
+            return {'input_ids': toked}
+
+    def decode(self, ids):
+        return ' '.join([self.id2token[id] for id in ids])
+
+    def __call__(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+        return self.tokenize(text, max_length=max_length, padding=padding,
+                             add_special_tokens=add_special_tokens, return_tensors=return_tensors)
+
+    def load_spacy_model(self,embed_file=None):
+        if embed_file is None:
+            embed_file = self.nlp_file
+
+        self.nlp_model = spacy.load(self.nlp_file)
+        self.weights = torch.FloatTensor(self.nlp_model.vocab.data)
+        self.token2hash = self.nlp_model.vocab.strings
+        self.hash2id = {i: self.nlp_model.vocab.vectors.key2row[i] for i in list(self.nlp_model.vocab.strings)}
+        self.token2id = {string: self.string2hash[self.hash2id[string]] for string in list(self.nlp_model.vocab.strings)}
+        self.hash2token = {i: self.nlp_model.vocab.strings[i] for i in list(self.nlp_model.vocab.strings)}
+        self.vocabulary = len(self.string2id)
+
+
+class GensimTokenizer(object):
+    def __init__(self,embed_file=EMBED_FILE):
+        self.embed_file = embed_file
+        self.load_gensim_model()
+
+    def tokenize(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+        toked = list(gensim.utils.tokenize(text))
+        toked = [self.token2id[w] for w in toked]
+        toked += [0]*(max_length-len(toked))
+        if return_tensors=='pt':
+            return {'input_ids': torch.tensor(toked,dtype=torch.int64)}
+        else:
+            return {'input_ids': toked}
+
+    def decode(self, ids):
+        return ' '.join([self.id2token[id] for id in ids])
+
+    def __call__(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+        return self.tokenize(text, max_length=max_length, padding=padding,
+                             add_special_tokens=add_special_tokens, return_tensors=return_tensors)
+
+    def load_gensim_model(self,embed_file=None):
+        if embed_file is None:
+            embed_file = self.embed_file
+        self.embed_model = api.load(embed_file)
+        self.weights = torch.FloatTensor(self.embed_model.wv.vectors)
+        self.vocabulary = self.embed_model.vocab
+        self.token2id = {w: self.vocabulary[w].index for w in self.vocabulary.keys()}
+        self.id2token = {self.vocabulary[w].index: w for w in self.vocabulary.keys()}
+        self.vocab_size = len(self.embed_model.vocab)
+
 
 def get_qas_ids_from_file_dict(file_dict):
     return list(chain(*[chain(*[[j['id'] for j in chain(i['qas'])] \
@@ -116,7 +186,8 @@ def tokenize_to_dict(tokenizer, text, output_len, text_label=None, make_pad_nega
         encodings['input_ids'] = input_ids
 
     encodings[(text_label+'_input_ids').lstrip('_')] = encodings.pop('input_ids')
-    encodings[(text_label+'_attention_mask').lstrip('_')] = encodings.pop('attention_mask')
+    if 'attention_mask' in encodings.keys():
+        encodings[(text_label+'_attention_mask').lstrip('_')] = encodings.pop('attention_mask')
     return encodings
 
 
