@@ -20,15 +20,16 @@ SPACY_MODEL = 'en_core_web_md'
 
 
 class SpacyTokenizer(object):
-    def __init__(self, nlp_file=SPACY_MODEL, padding_value=-100):
+    def __init__(self, nlp_file=SPACY_MODEL):
         self.nlp_file = nlp_file
-        self.padding_value = padding_value
         self.load_spacy_model()
 
-    def tokenize(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+    def tokenize(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         doc = self.nlp_model(text)
         toked = [self.token2id[str(tok)] for tok in doc if tok.has_vector]
-        toked += [self.padding_value] * (max_length - len(toked))
+        if truncation:
+            toked = toked[:max_length]
+        toked += [self.padding_value] * max((max_length - len(toked)), 0)
         if return_tensors == 'pt':
             return {'input_ids': torch.tensor(toked, dtype=torch.int64)}
         else:
@@ -37,14 +38,9 @@ class SpacyTokenizer(object):
     def decode(self, ids):
         return ' '.join([self.id2token[int(id.detach().numpy())] for id in ids if int(id.detach().numpy()) != self.padding_value])
 
-    def __call__(self, text, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+    def __call__(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         return self.tokenize(text, max_length=max_length, padding=padding,
                              add_special_tokens=add_special_tokens, return_tensors=return_tensors)
-
-    def __getitem__(self,idx):
-        if idx == self.padding_value:
-            return '<PAD>'
-        return self.id2token[idx]
 
     def load_spacy_model(self,embed_file=None):
         if embed_file is None:
@@ -54,6 +50,9 @@ class SpacyTokenizer(object):
 
         self.nlp_model = spacy.load(embed_file)
         self.weights = torch.FloatTensor(self.nlp_model.vocab.vectors.data)
+
+        # Add in an additional row at the end of the weights matrix, for compatibility issues with torch.Embedding
+        self.weights = torch.cat((self.weights,torch.tensor(np.zeros((1,self.weights.shape[1])))))
         self.token2hash = self.nlp_model.vocab.strings
         #self.hash2id = {i: self.nlp_model.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp_model.vocab.strings)
         #                    if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
@@ -65,7 +64,18 @@ class SpacyTokenizer(object):
                         if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
         #self.hash2token = {i: self.nlp_model.vocab.strings[i] for i in list(self.nlp_model.vocab.strings)
         #                   if i in self.nlp_model.vocab.vectors.key2row.keys()}
-        self.vocabulary = len(self.token2id)
+        self.raw_vocab_size = len(self.token2id) #all possible tokens, regardless of if there's an embedding
+        self.vocab_size = max(self.token2id.values()) + 1
+        self.padding_value = self.vocab_size #set padding to one more than the final index
+        self.vocab_size += 1 # add the padding value to the vocab size
+
+    def __getitem__(self,idx):
+        if idx == self.padding_value:
+            return '<PAD>'
+        return self.id2token[idx]
+
+    def __dict__(self,tok):
+        return self.token2id[tok]
 
     def get_weight(self,tok):
         return self.weights[self.token2id[tok]]
@@ -83,7 +93,6 @@ class SpacyTokenizer(object):
     def top_similar(self,word,n=10):
         topidx = np.dot(tokenizer.weights[self.token2id[word]],tokenizer.weights.T).argsort()[-1*n-1:-1][::-1]
         return [self.id2token[i] for i in topidx]
-
 
 
 class GensimTokenizer(object):

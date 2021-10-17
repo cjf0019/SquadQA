@@ -65,7 +65,8 @@ class SquadDataModule(pl.LightningDataModule):
             max_label_len=50,
             separate_context_question=False,
             negative_pads=False,
-            batch_size=64
+            batch_size=64,
+            num_workers=0
             ):
         super().__init__()
         self.batch_size=batch_size
@@ -79,6 +80,7 @@ class SquadDataModule(pl.LightningDataModule):
         self.max_label_len = max_label_len
         self.separate_context_question = separate_context_question
         self.negative_pads = negative_pads
+        self.num_workers = num_workers
 
     def setup(self):
         self.train_dataset = SquadDataset(
@@ -102,7 +104,7 @@ class SquadDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4
+            num_workers=self.num_workers
             )
 
     def val_dataloader(self):
@@ -110,7 +112,7 @@ class SquadDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=4,
             shuffle=False,
-            num_workers=4
+            num_workers=self.num_workers
             )
 
     def test_dataloader(self):
@@ -118,7 +120,7 @@ class SquadDataModule(pl.LightningDataModule):
             self.test_dataset,
             batch_size=4,
             shuffle=False,
-            num_workers=1
+            num_workers=self.num_workers
             )
 
 
