@@ -99,8 +99,10 @@ class SquadModel(pl.LightningModule):
 
 
 class InputProcessor(nn.Module):
-    def __init__(self, x_dim=512, vocab_dim=512, vocab_size=32128, embedding_dim=100,
-                 one_hot=True, negative_padding=False):
+    def __init__(self, tokenizer, x_dim=512,
+                 batch_size=4, seq_len=512,
+                # embedding_dim=300,
+                 one_hot=True, pad_idx=20000, agg_seq=False):
         """
         Switch back and forth between a integerized inputs (corresponding to vocab)
         and embeddings/one-hot.
@@ -123,18 +125,33 @@ class InputProcessor(nn.Module):
         super(InputProcessor, self).__init__()
 
         self.x_dim = x_dim
-        self.vocab_dim = vocab_dim
-        self.vocab_size = vocab_size
-        self.x_non_vocab_size = x_dim - vocab_size # inputs that aren't in the vocabulary
-        self.negative_padding = negative_padding
-        pad_idx = -100 if negative_padding else 0
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.tokenizer = tokenizer
+        #self.vocab_dim = vocab_dim
+        self.vocab_size = self.tokenizer.vocab_size
+        self.x_non_vocab_size = x_dim - self.vocab_size # inputs that aren't in the vocabulary
+        self.pad_idx = pad_idx
         self.one_hot = one_hot
         if not self.one_hot:
-            self.embed = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
+            #if self.embed_model is None:
+            #    self.embed_model = gensim.downloader.load("glove-wiki-gigaword-300")
+            #    weights = torch.FloatTensor(self.embed_model.wv.vectors)
+            #else:
+            #    self.embed_model = embed_model
+            #    ### !!! For non gensim models, the weights might be from a different mechanism... modify in the future
+
+            # Build nn.Embedding() layer
+            self.weights = self.tokenizer.weights
+            self.embed = nn.Embedding.from_pretrained(self.weights,padding_idx=self.pad_idx)
+            self.embed.requires_grad = False
+            #self.embed = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
+            self.embedding_dim = self.weights.shape[-1]
+
         else:
-            embedding_dim = vocab_size
-        self.embedding_dim = embedding_dim
+            self.embedding_dim = self.vocab_size
         self.mode = 'encode'
+        self.agg_seq = agg_seq # optionally reduce the sequence down through summing ('sum') or mean ('mean')
 
     def forward(self, x):
         if self.mode == 'encode':
@@ -154,9 +171,13 @@ class InputProcessor(nn.Module):
         else:
             x = self.embed(x)
 
-        x = torch.sum(x, 1)
-        if self.x_non_vocab_size > 0:
+        if self.x_non_vocab_size > 0:  # add non-vocab features
             x = torch.cat((x, x_nv))
+
+        if self.agg_seq == 'sum':
+            x = torch.sum(x, 1)
+        elif self.agg_seq == 'mean':
+            x = torch.mean(x, 1)
         return x
 
     def decode_(self,x):
@@ -166,8 +187,17 @@ class InputProcessor(nn.Module):
             return x    # Returns the batch of integerized sequences
 
         else:
-            distance = torch.norm(self.embed.weight.data - x, dim=1)
-            nearest = torch.argmin(distance)
+            #distance = torch.norm(self.embed.weight.data - x, dim=1)
+            distance = torch.matmul(decoded.view((self.batch_size * self.seq_len, self.embedding_dim)) /
+                                    (torch.norm(decoded.view((self.batch_size * self.seq_len, self.embedding_dim)), dim=0) + 1e-8),
+                         self.embed.weight.data.T.float() /
+                         (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(self.batch_size, self.seq_len, self.vocab_size)
+
+            nearest = torch.argmin(distance,dim=-1)
+            return nearest
+
+    def convert_tok_to_word(self, tok_result):
+        return [self.tokenizer.decode(i) for i in tok_result]
 
 
 class BasicEncoder(nn.Module):
