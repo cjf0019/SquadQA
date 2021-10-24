@@ -7,6 +7,9 @@ Created on Sun May 16 16:09:02 2021
 """
 
 MODEL_NAME = 't5-small'
+NEG_INF = -10000
+TINY_FLOAT = 1e-6
+
 import torch
 from torch import nn
 import pytorch_lightning as pl
@@ -14,6 +17,11 @@ from transformers import T5ForConditionalGeneration
 from transformers import AdamW
 from squad_utilities import generate_answers
 device = 'CPU'
+
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
+import torch.nn.functional as F
+import numpy as np
+
 
 class SquadModel(pl.LightningModule):
     def __init__(self):
@@ -307,14 +315,21 @@ class ConvolutionalEncoderDecoder(nn.Module):
         self.stride = 2
         self.dilation = 1
         self.padding = 0
-        self.x_dim = x_dim  # seq_len x vocab_dim
+        self.x_dim = x_dim
+        if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
+            self.batch_size = x_dim[0]
+            self.seq_len = x_dim[1]
+            self.vocab_dim = x_dim[2]
+        else:  # seq_len x vocab_dim
+            self.seq_len = x_dim[0]
+            self.vocab_dim = x_dim[1]
         self.linear_dims = self.calc_linear_dims()
         #self.output_padding = 0  # only used for decoder... added to right side of convtranspose
         #self.enc1 = nn.Linear(x_dim[1], nhid)
         self.relu = nn.ReLU()
 
         # encoder params
-        self.conv1 = nn.Conv1d(x.shape[2], 200, self.kernel_size, stride=self.stride)
+        self.conv1 = nn.Conv1d(self.vocab_dim, 200, self.kernel_size, stride=self.stride)
         self.conv2 = nn.Conv1d(200, 300, self.kernel_size, stride=self.stride)
         self.conv3 = nn.Conv1d(300, nhid, self.kernel_size, stride=self.stride)
         self.calc_z = nn.Linear(int(self.linear_dims[0])+ncond, 2)
@@ -324,7 +339,7 @@ class ConvolutionalEncoderDecoder(nn.Module):
         self.conv1t = nn.ConvTranspose1d(nhid, 300, self.kernel_size, stride=self.stride,
                                         padding=self.padding)
         self.conv2t = nn.ConvTranspose1d(300, 200, self.kernel_size, stride=self.stride,
-                                        padding=self.padding)  # getting issues syncing with encoder convs, so adding 1 output padding
+                                        padding=self.padding, output_padding=1)  # getting issues syncing with encoder convs, so adding 1 output padding
         self.conv3t = nn.ConvTranspose1d(200, x_dim[1], self.kernel_size, stride=self.stride,
                                         padding=self.padding, output_padding=self.out_pad)
 
@@ -339,7 +354,7 @@ class ConvolutionalEncoderDecoder(nn.Module):
             raise Exception("Received mode of {}. Will only accept 'encode' or 'decode'".format(self.mode))
 
     def _encode(self, x, y=None):
-        x = x.permute(0, 2, 1)  # batch_size x seq_len x vocab/embed_dim
+        x = x.permute(0, 2, 1).float()  # batch_size x seq_len x vocab/embed_dim
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
@@ -378,26 +393,24 @@ class ConvolutionalEncoderDecoder(nn.Module):
         3) output padding (out_pad) to apply to last decoder conv_transpose layer to ensure equality to original seq len
         """
         ### Encoder convolutional layers length dimension
-        self.conv1dim = self.calc_lout_encoder(self.x_dim[0],self.padding,self.dilation,self.kernel_size,self.stride)
+        self.conv1dim = self.calc_lout_encoder(self.seq_len,self.padding,self.dilation,self.kernel_size,self.stride)
         self.conv2dim = self.calc_lout_encoder(self.conv1dim,self.padding,self.dilation,self.kernel_size,self.stride)
         self.conv3dim = self.calc_lout_encoder(self.conv2dim, self.padding, self.dilation, self.kernel_size, self.stride)
 
         ### Decoder convolutional layers length dimension
-        self.conv1tdim = self.calc_lout_decoder(int(round(self.conv3dim)),self.padding,self.dilation,self.kernel_size,self.stride,0)
-        self.conv2tdim = self.calc_lout_decoder(self.conv1tdim,self.padding,self.dilation,self.kernel_size,self.stride,0)
-        self.out_pad = int(round(self.conv1dim)) - int(round(self.conv2tdim)) #ensure the resulting dimension mirrors that from the encoder conv operation
-        self.conv3tdim = self.calc_lout_decoder(self.conv2tdim,self.padding,self.dilation,self.kernel_size,self.stride,self.out_pad)
+        self.conv1tdim = int(round(self.calc_lout_decoder(int(round(self.conv3dim)),self.padding,self.dilation,self.kernel_size,self.stride,0)))
+        self.conv2tdim = int(round(self.calc_lout_decoder(self.conv1tdim,self.padding,self.dilation,self.kernel_size,self.stride,1)))
+        self.conv3tdim = int(round(self.calc_lout_decoder(self.conv2tdim,self.padding,self.dilation,self.kernel_size,self.stride,0)))
+        self.out_pad = self.seq_len - self.conv3tdim  # using output padding, ensure the last layer reproduces the input dimension
+        self.conv3tdim = self.seq_len
         return (int(round(self.conv3dim)), int(round(self.conv3tdim)))
 
 
 class VAE(nn.Module):
-    def __init__(self, shape=(512,32128), nhid=100, device='cpu'):
+    def __init__(self, shape=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
         super(VAE, self).__init__()
         self.dim = nhid
-        #self.encoder = BasicEncoder(shape, nhid)
-        #self.decoder = BasicDecoder(shape[1], nhid)
-        self.encoder = ConvolutionalEncoder(x_dim=shape,nhid=nhid)
-        self.decoder = ConvolutionalDecoder(output_dim=shape,nhid=nhid)
+        self.encdec = ConvolutionalEncoderDecoder(x_dim=shape,nhid=nhid,decoder_softmax_temp=dec_softmax_temp)
         self.device = device
 
     def sampling(self, mean, logvar):
@@ -406,15 +419,20 @@ class VAE(nn.Module):
         return mean + eps * sigma
 
     def forward(self, x):
-        mean, logvar = self.encoder(x)
+        mean, logvar = self.encdec(x)
         z = self.sampling(mean, logvar)
-        return self.decoder(z), mean, logvar
+        self.encdec.mode = 'decode'
+        decoded = self.encdec(z)
+        self.encdec.mode = 'encode'
+        return decoded, mean, logvar
 
     def generate(self, batch_size=None):
         z = torch.randn((batch_size, self.dim)).to(self.device) if batch_size else torch.randn((1, self.dim)).to(self.device)
-        res = self.decoder(z)
+        self.encdec.mode = 'decode'
+        res = self.encdec(z)
         if not batch_size:
             res = res.squeeze(0)
+        self.encdec.mode = 'encode'
         return res
 
 
@@ -460,21 +478,6 @@ def vae_loss(X, X_hat, mean, logvar):
     reconstruction_loss = nn.BCE_loss(X_hat, X)
     KL_divergence = 0.5 * torch.sum(-1 - logvar + torch.exp(logvar) + mean ** 2)
     return reconstruction_loss + KL_divergence
-
-
-import torch
-import torch.nn as nn
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
-import torch.nn.functional as F
-import torchtext
-import nltk
-import time
-from datetime import timedelta
-import numpy as np
-from sklearn import metrics
-
-NEG_INF = -10000
-TINY_FLOAT = 1e-6
 
 
 def mask_softmax(matrix, mask=None):
