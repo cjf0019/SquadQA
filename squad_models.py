@@ -512,10 +512,22 @@ class ConvolutionalEncoderDecoder(nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, shape=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
+    def __init__(self, tokenizer=None, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
         super(VAE, self).__init__()
+        self.x_dim=x_dim
+        self.tokenizer = tokenizer
+        if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
+            self.batch_size = x_dim[0]
+            self.seq_len = x_dim[1]
+            self.vocab_dim = x_dim[2]
+        else:  # seq_len x vocab_dim
+            self.seq_len = x_dim[0]
+            self.vocab_dim = x_dim[1]
+
+        if tokenizer is not None:
+            self.inpproc = InputProcessor(tokenizer, batch_size=self.batch_size, seq_len=self.seq_len, one_hot=False)
         self.dim = nhid
-        self.encdec = ConvolutionalEncoderDecoder(x_dim=shape,nhid=nhid,decoder_softmax_temp=dec_softmax_temp)
+        self.encdec = ConvolutionalEncoderDecoder(x_dim=x_dim,nhid=nhid,decoder_softmax_temp=dec_softmax_temp)
         self.device = device
 
     def sampling(self, mean, logvar):
@@ -524,11 +536,18 @@ class VAE(nn.Module):
         return mean + eps * sigma
 
     def forward(self, x):
+        if self.tokenizer is not None:
+            x = self.inpproc(x) # convert input_ids to word embeddings
+
         mean, logvar = self.encdec(x)
         z = self.sampling(mean, logvar)
         self.encdec.mode = 'decode'
         decoded = self.encdec(z)
         self.encdec.mode = 'encode'
+        print(decoded.shape)
+        if self.tokenizer is not None:
+            self.inpproc.mode = 'decode'
+            decoded = self.inpproc(decoded)
         return decoded, mean, logvar
 
     def generate(self, batch_size=None):
