@@ -42,7 +42,8 @@ class SquadDataset(Dataset):
             example.update(input_ids)
 
         ### Tokenize the answers
-        answer = tokenize_to_dict(self.tokenizer, example_row['answer'], self.max_label_len)
+        answer = tokenize_to_dict(self.tokenizer, example_row['answer'], self.max_label_len,
+                                        text_label='answer', make_pad_negative=self.negative_pads)
         example.update(answer)
 
         example = {k: v.flatten() for k, v in example.items()}

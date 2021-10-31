@@ -101,7 +101,7 @@ class SquadModel(pl.LightningModule):
 class SquadModel_VAE(pl.LightningModule):
     def __init__(self):
         super().__init__()
-        self.model = VAE_TextProc(shape=(512,200001), nhid=50, dec_softmax_temp=0.01)
+        self.model = VAE(shape=(512,200001), nhid=50, dec_softmax_temp=0.01)
 
     def forward(self, input_ids, attention_mask, labels=None):
         output = self.model(

@@ -19,6 +19,7 @@ EMBED_FILE = "glove-wiki-gigaword-300"
 SPACY_MODEL = 'en_core_web_md'
 
 
+
 class SpacyTokenizer(object):
     def __init__(self, nlp_file=SPACY_MODEL):
         self.nlp_file = nlp_file
@@ -26,7 +27,7 @@ class SpacyTokenizer(object):
 
     def tokenize(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         doc = self.nlp_model(text)
-        toked = [self.token2id[str(tok)] for tok in doc if tok.has_vector]
+        toked = [self.token2id[str(tok)] for tok in doc if tok.has_vector and str(tok) in self.token2id.keys()]
         if truncation:
             toked = toked[:max_length]
         toked += [self.padding_value] * max((max_length - len(toked)), 0)
