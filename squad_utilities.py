@@ -21,20 +21,31 @@ SPACY_MODEL = 'en_core_web_md'
 
 
 class SpacyTokenizer(object):
-    def __init__(self, nlp_file=SPACY_MODEL):
+    def __init__(self, nlp_file=SPACY_MODEL, sentence_separation=False):
         self.nlp_file = nlp_file
         self.load_spacy_model()
+        self.sentence_separation = sentence_separation
 
     def tokenize(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
         doc = self.nlp_model(text)
-        toked = [self.token2id[str(tok)] for tok in doc if tok.has_vector and str(tok) in self.token2id.keys()]
-        if truncation:
-            toked = toked[:max_length]
-        toked += [self.padding_value] * max((max_length - len(toked)), 0)
-        if return_tensors == 'pt':
-            return {'input_ids': torch.tensor(toked, dtype=torch.int64)}
+        if self.sentence_separation:
+            input_ids = []
+            for sent in doc.sents:
+                toked = [self.token2id[str(tok)] for tok in sent if tok.has_vector and str(tok) in self.token2id.keys()]
+                if truncation:
+                    toked = toked[:max_length]
+                toked += [self.padding_value] * max((max_length - len(toked)), 0)
+                input_ids.append(toked)
+
         else:
-            return {'input_ids': toked}
+            input_ids = [self.token2id[str(tok)] for tok in doc if tok.has_vector and str(tok) in self.token2id.keys()]
+            if truncation:
+                input_ids = input_ids[:max_length]
+            input_ids += [self.padding_value] * max((max_length - len(input_ids)), 0)
+        if return_tensors == 'pt':
+            return {'input_ids': torch.tensor(input_ids, dtype=torch.int64)}
+        else:
+            return {'input_ids': input_ids}
 
     def decode(self, ids):
         return ' '.join([self.id2token[int(id.detach().numpy())] for id in ids if int(id.detach().numpy()) != self.padding_value])
