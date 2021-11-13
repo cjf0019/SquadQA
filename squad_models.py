@@ -260,10 +260,18 @@ class InputProcessor(nn.Module):
             return x    # Returns the batch of integerized sequences
 
         else:
-            distance = torch.matmul(x.view((self.batch_size * self.seq_len, self.embedding_dim))
-                                    (torch.norm(x.view((self.batch_size * self.seq_len, self.embedding_dim)), dim=0) + 1e-8),
-                                    self.embed.weight.data.T.float()(torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8))\
-                                    .view(self.batch_size, self.seq_len, self.vocab_size)
+            #distance = torch.norm(self.embed.weight.data - x, dim=1)
+            to_flatten = [dim for dim in x.shape[:-1]]
+            decode_dims = (np.prod(to_flatten), x.shape[-1]) # flatten so each row corresponds to an embedding in a sentence/example/batch
+
+            distance = torch.matmul(x.view(decode_dims) / (torch.norm(x.view(decode_dims), dim=0) + 1e-8),
+                    self.embed.weight.data.T.float() / (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(
+                        tuple(to_flatten + [self.vocab_size]))
+
+            #distance = torch.matmul(x.view((self.batch_size * self.seq_len, self.embedding_dim)) /
+            #                        (torch.norm(x.view((self.batch_size * self.seq_len, self.embedding_dim)), dim=0) + 1e-8),
+            #             self.embed.weight.data.T.float() /
+            #             (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(self.batch_size, self.seq_len, self.vocab_size)
 
             nearest = torch.argmin(distance,dim=-1)
             return nearest
@@ -418,13 +426,12 @@ class ConvolutionalEncoderDecoder(nn.Module):
         self.dilation = 1
         self.padding = 0
         self.x_dim = x_dim
-        if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
+        if len(x_dim) > 2:  # (batch_size x !!! OPTIONAL num_sentences x seq_len x embed/vocab_size)
             self.batch_size = x_dim[0]
-            self.seq_len = x_dim[1]
-            self.vocab_dim = x_dim[2]
-        else:  # seq_len x vocab_dim
-            self.seq_len = x_dim[0]
-            self.vocab_dim = x_dim[1]
+
+        self.seq_len = x_dim[-2]
+        self.vocab_dim = x_dim[-1]
+
         self.linear_dims = self.calc_linear_dims()
         #self.output_padding = 0  # only used for decoder... added to right side of convtranspose
         #self.enc1 = nn.Linear(x_dim[1], nhid)
@@ -442,7 +449,7 @@ class ConvolutionalEncoderDecoder(nn.Module):
                                         padding=self.padding)
         self.conv2t = nn.ConvTranspose1d(300, 200, self.kernel_size, stride=self.stride,
                                         padding=self.padding, output_padding=1)  # getting issues syncing with encoder convs, so adding 1 output padding
-        self.conv3t = nn.ConvTranspose1d(200, x_dim[1], self.kernel_size, stride=self.stride,
+        self.conv3t = nn.ConvTranspose1d(200, self.vocab_dim, self.kernel_size, stride=self.stride,
                                         padding=self.padding, output_padding=self.out_pad)
 
         self.decoder_softmax_temp = decoder_softmax_temp
@@ -456,10 +463,16 @@ class ConvolutionalEncoderDecoder(nn.Module):
             raise Exception("Received mode of {}. Will only accept 'encode' or 'decode'".format(self.mode))
 
     def _encode(self, x, y=None):
-        x = x.permute(0, 2, 1).float()  # batch_size x seq_len x vocab/embed_dim
+        if len(self.x_dim) == 4:
+            x = x.view((x.shape[0]*x.shape[1],x.shape[2],x.shape[3])) # if each sample is broken into sentences, combine batch and sentences into one dimension
+
+        x = x.permute(0, 2, 1).float()  # batch_size*num_sentences x seq_len x vocab/embed_dim
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
+
+        if len(self.x_dim) == 4:
+            x = x.view(tuple([self.x_dim[0]]+[self.x_dim[1]]+[i for i in x.shape[1:]]))
         if y is not None:
             x = torch.cat((x, y))
 
@@ -468,16 +481,22 @@ class ConvolutionalEncoderDecoder(nn.Module):
         return mean.squeeze(), var.squeeze()
 
     def _decode(self, x, y=None):
-        x = x.view((x.shape[0], x.shape[1], 1))  # unflatten hidden layer
+        #x = x.view((x.shape[0], x.shape[1], 1))  # unflatten hidden layer
+        x = x.unsqueeze(-1)
+        if len(x.shape) == 4:
+            x = x.view((x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))
         x = self.decode_z(x)
         x = self.relu(self.conv1t(x))
         x = self.relu(self.conv2t(x))
         x = self.relu(self.conv3t(x))
+        x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
+
+        if len(self.x_dim) == 4:
+            x = x.view(tuple([self.x_dim[0]]+[self.x_dim[1]]+[i for i in x.shape[1:]]))
+
         if y is not None:
             x = torch.cat((x, y))
 
-        # the following softmax assumes one-hot embedding
-        x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
         #x = torch.div(x,torch.norm(x, dim=1)) #normalize per sequence index
         x = torch.softmax(x/self.decoder_softmax_temp, axis=-1)
         return x
