@@ -176,7 +176,6 @@ class SquadModel_VAE(pl.LightningModule):
 class InputProcessor(nn.Module):
     def __init__(self, tokenizer, x_dim=512,
                  batch_size=4, seq_len=512,
-                # embedding_dim=300,
                  one_hot=True, pad_idx=20000, agg_seq=False):
         """
         Switch back and forth between a integerized inputs (corresponding to vocab)
@@ -242,17 +241,16 @@ class InputProcessor(nn.Module):
 
         if self.one_hot:
             x = nn.functional.one_hot(x,self.vocab_size).float()
-            print(x.shape, x)
         else:
-            x = self.embed(x)
+            x = self.embed(x.int())
 
         if self.x_non_vocab_size > 0:  # add non-vocab features
             x = torch.cat((x, x_nv))
 
-        if self.agg_seq == 'sum':
-            x = torch.sum(x, 1)
+        if self.agg_seq == 'sum' or self.agg_seq == True:
+            x = torch.sum(x, -2)  #sum the second to last dimension, corresponding to per sentence
         elif self.agg_seq == 'mean':
-            x = torch.mean(x, 1)
+            x = torch.mean(x, -2)
         return x
 
     def decode_(self,x):
@@ -262,11 +260,10 @@ class InputProcessor(nn.Module):
             return x    # Returns the batch of integerized sequences
 
         else:
-            #distance = torch.norm(self.embed.weight.data - x, dim=1)
-            distance = torch.matmul(decoded.view((self.batch_size * self.seq_len, self.embedding_dim)) /
-                                    (torch.norm(decoded.view((self.batch_size * self.seq_len, self.embedding_dim)), dim=0) + 1e-8),
-                         self.embed.weight.data.T.float() /
-                         (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(self.batch_size, self.seq_len, self.vocab_size)
+            distance = torch.matmul(x.view((self.batch_size * self.seq_len, self.embedding_dim))
+                                    (torch.norm(x.view((self.batch_size * self.seq_len, self.embedding_dim)), dim=0) + 1e-8),
+                                    self.embed.weight.data.T.float()(torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8))\
+                                    .view(self.batch_size, self.seq_len, self.vocab_size)
 
             nearest = torch.argmin(distance,dim=-1)
             return nearest

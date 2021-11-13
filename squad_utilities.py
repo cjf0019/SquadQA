@@ -233,9 +233,11 @@ def setup_input_and_run_model(data_module,model,raw_sample=None):
     return example, loss, logits
 
 
-def tokenize_to_dict(tokenizer, text, output_len, text_label=None, make_pad_negative=False):
+def tokenize_to_dict(tokenizer, text, output_len, sentence_separation='default', max_sentences=None,
+                     text_label=None, make_pad_negative=False):
     text_label = '' if text_label is None else text_label
-    encodings = tokenizer(text, truncation=True, max_length=output_len, padding="max_length", add_special_tokens=True, return_tensors='pt')
+    encodings = tokenizer(text, truncation=True, max_length=output_len, sentence_separation='default', max_sentences=None,
+                          padding="max_length", add_special_tokens=True, return_tensors='pt')
     if make_pad_negative:
         input_ids = encodings['input_ids']
         input_ids[input_ids == 0] = -100
