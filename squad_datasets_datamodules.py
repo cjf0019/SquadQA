@@ -51,8 +51,7 @@ class NLPDataset(Dataset):
         self.tokenizer.sentence_separation = sentence_separation
         self.aggregate_by = aggregate_by
         self.separate_cols_on_return = separate_cols_on_return  # only applicable if aggregate_by == 'row'... will return each text col separately instead of concatenating them
-        self.run_tokenizer_on
-        output = True
+        self.run_tokenizer_on_output = True
 
         # if self.sentence_separation:
         #    self.count_sentences(self.text_cols)
