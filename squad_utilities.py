@@ -13,29 +13,44 @@ import torch
 from itertools import chain
 import spacy
 import numpy as np
+from joblib import Parallel, delayed
+
 
 EMBED_DIR = "C:\\Users\\cfavr\\gensim-data\\"
 EMBED_FILE = "glove-wiki-gigaword-300"
 SPACY_MODEL = 'en_core_web_md'
 
 
+def chunker(iterable, total_length, chunksize):
+    return (iterable[pos: pos + chunksize] for pos in range(0, total_length, chunksize))
+
+def flatten(list_of_lists):
+    "Flatten a list of lists to a combined list"
+    return [item for sublist in list_of_lists for item in sublist]
 
 class SpacyTokenizer(object):
     def __init__(self, nlp_file=SPACY_MODEL, sentence_separation=False):
         self.nlp_file = nlp_file
-        self.load_spacy_model()
         self.sentence_separation = sentence_separation
+        self.load_spacy_model()
 
-    def tokenize(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
+    def tokenize(self, text, truncation=True, max_length=512,  sentence_separation='default', max_sentences=None,
+                 padding='max_length', add_special_tokens=False, return_tensors='pt'):
         doc = self.nlp_model(text)
-        if self.sentence_separation:
+        sentence_separation = self.sentence_separation if sentence_separation == 'default' else sentence_separation
+
+        if sentence_separation:
             input_ids = []
+            sent_count = 0
             for sent in doc.sents:
+                if max_sentences is not None and sent_count >= max_sentences:
+                    continue
                 toked = [self.token2id[str(tok)] for tok in sent if tok.has_vector and str(tok) in self.token2id.keys()]
                 if truncation:
                     toked = toked[:max_length]
                 toked += [self.padding_value] * max((max_length - len(toked)), 0)
                 input_ids.append(toked)
+                sent_count += 1
 
         else:
             input_ids = [self.token2id[str(tok)] for tok in doc if tok.has_vector and str(tok) in self.token2id.keys()]
@@ -50,9 +65,18 @@ class SpacyTokenizer(object):
     def decode(self, ids):
         return ' '.join([self.id2token[int(id.detach().numpy())] for id in ids if int(id.detach().numpy()) != self.padding_value])
 
-    def __call__(self, text, truncation=True, max_length=512, padding='max_length', add_special_tokens=False, return_tensors='pt'):
-        return self.tokenize(text, max_length=max_length, padding=padding,
-                             add_special_tokens=add_special_tokens, return_tensors=return_tensors)
+    def __call__(self, text, truncation=True, max_length=512, sentence_separation='default', max_sentences=None,
+                 padding='max_length', add_special_tokens=False, return_tensors='pt'):
+        return self.tokenize(text, max_length=max_length, sentence_separation=sentence_separation, max_sentences=max_sentences,
+                             padding=padding, add_special_tokens=add_special_tokens, return_tensors=return_tensors)
+
+    def __getitem__(self,idx):
+        if idx == self.padding_value:
+            return '<PAD>'
+        return self.id2token[idx]
+
+    def __dict__(self,tok):
+        return self.token2id[tok]
 
     def load_spacy_model(self,embed_file=None):
         if embed_file is None:
@@ -61,6 +85,9 @@ class SpacyTokenizer(object):
             self.nlp_file = embed_file
 
         self.nlp_model = spacy.load(embed_file)
+        if self.sentence_separation:
+            self.nlp_model.add_pipe('sentencizer')
+
         self.weights = torch.FloatTensor(self.nlp_model.vocab.vectors.data)
 
         # Add in an additional row at the end of the weights matrix, for compatibility issues with torch.Embedding
@@ -81,18 +108,12 @@ class SpacyTokenizer(object):
         self.padding_value = self.vocab_size #set padding to one more than the final index
         self.vocab_size += 1 # add the padding value to the vocab size
 
-    def __getitem__(self,idx):
-        if idx == self.padding_value:
-            return '<PAD>'
-        return self.id2token[idx]
-
-    def __dict__(self,tok):
-        return self.token2id[tok]
-
+    ##### WORD EMBEDDING FUNCTIONS #####
     def get_weight(self,tok):
         return self.weights[self.token2id[tok]]
 
-    def _norm_weight(self,vec):
+    @staticmethod
+    def _norm_weight(vec):
         return np.sqrt(sum(x * x for x in vec))
 
     def cosine_similarity(self, word1, word2, normalize=True):
@@ -105,6 +126,28 @@ class SpacyTokenizer(object):
     def top_similar(self,word,n=10):
         topidx = np.dot(tokenizer.weights[self.token2id[word]],tokenizer.weights.T).argsort()[-1*n-1:-1][::-1]
         return [self.id2token[i] for i in topidx]
+
+    ######### BATCH PROCESSING FUNCTIONS ###########
+    def calculate_num_sentences(self, texts):
+        preproc_pipe = []
+        with self.nlp_model.select_pipes(enable='sentencizer'):
+            for doc in self.nlp_model.pipe(texts, batch_size=20):
+                preproc_pipe.append(self.calculate_num_sentences_doc(doc))
+        return preproc_pipe
+
+    def num_sentences_parallel(self, texts, chunksize=30, njobs=6):
+        executor = Parallel(n_jobs=njobs, backend='multiprocessing', prefer="processes")
+        do = delayed(self.calculate_num_sentences)
+        tasks = (do(chunk) for chunk in chunker(texts, len(texts), chunksize=chunksize))
+        result = executor(tasks)
+        return flatten(result)
+
+    ######## spaCy TEXT PROCESSING FUNCTIONS #########
+    def calculate_num_sentences_doc(self, doc):
+        if not isinstance(doc, spacy.tokens.doc.Doc):
+            doc = self.nlp_model(doc)
+        return len([i for i in doc.sents])
+
 
 
 class GensimTokenizer(object):
@@ -236,8 +279,8 @@ def setup_input_and_run_model(data_module,model,raw_sample=None):
 def tokenize_to_dict(tokenizer, text, output_len, sentence_separation='default', max_sentences=None,
                      text_label=None, make_pad_negative=False):
     text_label = '' if text_label is None else text_label
-    encodings = tokenizer(text, truncation=True, max_length=output_len, sentence_separation='default', max_sentences=None,
-                          padding="max_length", add_special_tokens=True, return_tensors='pt')
+    encodings = tokenizer(text, truncation=True, max_length=output_len, sentence_separation=sentence_separation,
+                          max_sentences=max_sentences, padding="max_length", add_special_tokens=True, return_tensors='pt')
     if make_pad_negative:
         input_ids = encodings['input_ids']
         input_ids[input_ids == 0] = -100
