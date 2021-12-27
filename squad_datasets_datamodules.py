@@ -160,7 +160,7 @@ class NLPDataset(Dataset):
         if tokenizer is not None and isinstance(tokenizer,SpacyTokenizer):
             return tokenizer.calculate_num_sentences(text)
         else:
-            return len(set(filter(lambda x: x != '', re.split('[.!?]', 'this is a test! did it work?'))))  # if no tokenizer present, just count by splitting by a period
+            return len(set(filter(lambda x: x != '', re.split('[.!?]', text))))  # if no tokenizer present, just count by splitting by a period
 
     @staticmethod
     def calculate_num_sentences_textcol(df, text_col, tokenizer=None):

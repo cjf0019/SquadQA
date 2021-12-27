@@ -85,8 +85,8 @@ class SpacyTokenizer(object):
             self.nlp_file = embed_file
 
         self.nlp_model = spacy.load(embed_file)
-        if self.sentence_separation:
-            self.nlp_model.add_pipe('sentencizer')
+        #if self.sentence_separation:
+        #    self.nlp_model.add_pipe('sentencizer')
 
         self.weights = torch.FloatTensor(self.nlp_model.vocab.vectors.data)
 
@@ -130,7 +130,10 @@ class SpacyTokenizer(object):
     ######### BATCH PROCESSING FUNCTIONS ###########
     def calculate_num_sentences(self, texts):
         preproc_pipe = []
-        with self.nlp_model.select_pipes(enable='sentencizer'):
+        if isinstance(texts,str):
+            texts = [texts]
+        #with self.nlp_model.select_pipes(enable='sentencizer'):
+        with self.nlp_model.select_pipes(enable=['tok2vec', 'parser']):
             for doc in self.nlp_model.pipe(texts, batch_size=20):
                 preproc_pipe.append(self.calculate_num_sentences_doc(doc))
         return preproc_pipe
