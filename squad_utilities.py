@@ -124,7 +124,7 @@ class SpacyTokenizer(object):
         return mult*norm
 
     def top_similar(self,word,n=10):
-        topidx = np.dot(tokenizer.weights[self.token2id[word]],tokenizer.weights.T).argsort()[-1*n-1:-1][::-1]
+        topidx = np.dot(self.weights[self.token2id[word]],self.weights.T).argsort()[-1*n-1:-1][::-1]
         return [self.id2token[i] for i in topidx]
 
     ######### BATCH PROCESSING FUNCTIONS ###########

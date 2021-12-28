@@ -124,7 +124,16 @@ class NLPDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.df)
+        if self.aggregate_by == 'row':
+            return len(self.df)
+        else:
+            last_col = self.text_cols[-1]
+            max_idx_start = int(self.df[[last_col+'_IDX_Start']].max())
+            if self.aggregate_by == 'column':
+                return max_idx_start
+            else:
+                # count number of sentences in last text column
+                return max_idx_start + int(self.df[[last_col+'_NumSentences']].iloc[-1])
 
 
     def index_text_samples(self, text_cols):
