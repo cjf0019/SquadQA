@@ -54,8 +54,24 @@ class Test_NLPDataset_SentenceAgg(TestCase):
         self.dataset = NLPDataset(df,tokenizer,text_cols=['Text_1','Text_2'],aggregate_by='sentence')
 
 
+    def test_idx_starts(self):
+        self.assertEqual(self.dataset.idx_starts['Text_1'], 0)
+        self.assertEqual(self.dataset.idx_starts['Text_2'], 9)
+
+
+    def test_num_sentences(self):
+        self.assertEqual(self.dataset.df.Text_1_NumSentences,[3,2,4])
+        self.assertEqual(self.dataset.df.Text_2_NumSentences,[1,2,2])
+
+
     def test_retrieve_text(self):
-        assert False
+        self.assertEqual(self.dataset.retrieve_text(13)['Text_2'],'What do you know about lions? They scare me!')
+        self.assertEqual(self.dataset.retrieve_text(0)['Text_1'],'Squirrels like to jump around. I ran into a squirrel at the park the other day. It was a massive squirrel.')
+
+
+    def test_getidx(self):
+        self.assertEqual(int(self.dataset[13]['Text_2_Sent_1'].sum()), 2484833)
+
 
     def test_index_text_samples(self):
         assert False

@@ -94,7 +94,8 @@ class NLPDataset(Dataset):
                 text = ' '.join(self.df[text_col.split('+')].iloc[idx])
 
             else:
-                text = {text_col: self.df.query(f"{text_col}_IDX_Start < {idx}").iloc[0]}
+                df_row = self.df.query(f"{text_col}_IDX_Start <= {idx} < {len(self)}").iloc[-1]
+                text = {text_col: df_row[text_col], 'df_row_idx': list(self.df.index).index(df_row.name)}
         return text
 
 
@@ -104,7 +105,7 @@ class NLPDataset(Dataset):
 
         ### TOKENIZE
         if self.run_tokenizer_on_output:
-            text_fields = [i for i in example.keys()]
+            text_fields = [i for i in example.keys() if i in self.text_cols]
             for text in text_fields:
                 example.update(tokenize_to_dict(self.tokenizer, example[text], self.sentence_len,
                                                  sentence_separation=True, text_label=text,
@@ -113,12 +114,12 @@ class NLPDataset(Dataset):
             ### If extracting by specific sentence
             if self.aggregate_by == 'sentence':
                 ##!!!!!! NEED TO FIND THE GLOBAL IDX FOR THE SENTENCE
-                label = list(example.keys())[0]
+                label = list(example.keys())[0].replace('_input_ids','')
                 text_col_idx_start = self.idx_starts[label]
-                df_idx = idx - text_col_idx_start
-                idx_start = self.df.iloc[df_idx][list(example.keys())[0]+'_IDX_Start']
-                sent_ind = idx - idx_start
-                example = {text+'Sent_'+str(sent_ind): example[text][sent_ind]}
+                df_idx = example['df_row_idx']
+                idx_start = self.df.iloc[df_idx][label+'_IDX_Start']
+                sent_ind = int(idx - idx_start)
+                example = {text+'_Sent_'+str(sent_ind): example[text+'_input_ids'][sent_ind]}
 
         return example
 
@@ -165,20 +166,19 @@ class NLPDataset(Dataset):
 
 
     @staticmethod
-    def calculate_num_sentences(text, tokenizer=None):
+    def calculate_num_sentences(texts, tokenizer=None):
         if tokenizer is not None and isinstance(tokenizer,SpacyTokenizer):
-            return tokenizer.calculate_num_sentences(text)
+            return tokenizer.calculate_num_sentences(texts)
         else:
-            return len(set(filter(lambda x: x != '', re.split('[.!?]', text))))  # if no tokenizer present, just count by splitting by a period
+            return [len(set(filter(lambda x: x != '', re.split('[.!?]', text)))) for text in texts] # if no tokenizer present, just count by splitting by a period
 
     @staticmethod
     def calculate_num_sentences_textcol(df, text_col, tokenizer=None):
         """text_col can be either a column in the df with text, or a tuple or list of text columns.
             If a tuple or list, the number of sentences in the text concatenation will be returned """
         strcol = text_col if isinstance(text_col,str) else '+'.join(text_col)
-        df[strcol+'_NumSentences'] = NLPDataset.concat_text_cols(df,text_col).transform(lambda x:
-                                                                        NLPDataset.calculate_num_sentences(x,tokenizer))
-        print(f"Number of sentences calculated for {strcol}")
+        df[strcol+'_NumSentences'] = NLPDataset.calculate_num_sentences(NLPDataset.concat_text_cols(df,text_col), tokenizer)
+        print(f"Number of sentences calculated for {strcol}: {df[strcol+'_NumSentences'].sum()}")
         return df
 
     @staticmethod
