@@ -174,9 +174,7 @@ class SquadModel_VAE(pl.LightningModule):
 
 
 class InputProcessor(nn.Module):
-    def __init__(self, tokenizer, x_dim=512,
-                 batch_size=4, seq_len=512,
-                 one_hot=True, pad_idx=20000, agg_seq=False):
+    def __init__(self, tokenizer, x_dim=512, seq_len=512, one_hot=True, pad_idx=20000, agg_seq=False):
         """
         Switch back and forth between a integerized inputs (corresponding to vocab)
         and embeddings/one-hot.
@@ -199,7 +197,7 @@ class InputProcessor(nn.Module):
         super(InputProcessor, self).__init__()
 
         self.x_dim = x_dim
-        self.batch_size = batch_size
+        #self.batch_size = batch_size
         self.seq_len = seq_len
         self.tokenizer = tokenizer
         #self.vocab_dim = vocab_dim
@@ -426,8 +424,8 @@ class ConvolutionalEncoderDecoder(nn.Module):
         self.dilation = 1
         self.padding = 0
         self.x_dim = x_dim
-        if len(x_dim) > 2:  # (batch_size x !!! OPTIONAL num_sentences x seq_len x embed/vocab_size)
-            self.batch_size = x_dim[0]
+        #if len(x_dim) > 2:  # (batch_size x !!! OPTIONAL num_sentences x seq_len x embed/vocab_size)
+        #    self.batch_size = x_dim[0]
 
         self.seq_len = x_dim[-2]
         self.vocab_dim = x_dim[-1]
@@ -463,7 +461,8 @@ class ConvolutionalEncoderDecoder(nn.Module):
             raise Exception("Received mode of {}. Will only accept 'encode' or 'decode'".format(self.mode))
 
     def _encode(self, x, y=None):
-        if len(self.x_dim) == 4:
+        x_shape = x.shape
+        if len(x_shape) == 4:
             x = x.view((x.shape[0]*x.shape[1],x.shape[2],x.shape[3])) # if each sample is broken into sentences, combine batch and sentences into one dimension
 
         x = x.permute(0, 2, 1).float()  # batch_size*num_sentences x seq_len x vocab/embed_dim
@@ -471,8 +470,8 @@ class ConvolutionalEncoderDecoder(nn.Module):
         x = self.conv2(x)
         x = self.conv3(x)
 
-        if len(self.x_dim) == 4:
-            x = x.view(tuple([self.x_dim[0]]+[self.x_dim[1]]+[i for i in x.shape[1:]]))
+        if len(x_shape) == 4:
+            x = x.view(tuple([x_shape[0]]+[x_shape[1]]+[i for i in x.shape[1:]]))
         if y is not None:
             x = torch.cat((x, y))
 
@@ -483,16 +482,17 @@ class ConvolutionalEncoderDecoder(nn.Module):
     def _decode(self, x, y=None):
         #x = x.view((x.shape[0], x.shape[1], 1))  # unflatten hidden layer
         x = x.unsqueeze(-1)
-        if len(x.shape) == 4:
-            x = x.view((x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))
+        x_shape = x.shape
+        if len(x_shape) == 4:
+            x = x.view((x_shape[0]*x_shape[1],x_shape[2],x_shape[3]))
         x = self.decode_z(x)
         x = self.relu(self.conv1t(x))
         x = self.relu(self.conv2t(x))
         x = self.relu(self.conv3t(x))
         x = x.permute(0,2,1)  # batch_size x vocab/embed_dim x seq_len
 
-        if len(self.x_dim) == 4:
-            x = x.view(tuple([self.x_dim[0]]+[self.x_dim[1]]+[i for i in x.shape[1:]]))
+        if len(x_shape) == 4:
+            x = x.view(tuple([x_shape[0]]+[x_shape[1]]+[i for i in x.shape[1:]]))
 
         if y is not None:
             x = torch.cat((x, y))
@@ -532,16 +532,18 @@ class VAE(nn.Module):
         super(VAE, self).__init__()
         self.x_dim=x_dim
         self.tokenizer = tokenizer
-        if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
-            self.batch_size = x_dim[0]
-            self.seq_len = x_dim[1]
-            self.vocab_dim = x_dim[2]
-        else:  # seq_len x vocab_dim
-            self.seq_len = x_dim[0]
-            self.vocab_dim = x_dim[1]
+        #if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
+        #    self.batch_size = x_dim[0]
+        #    self.seq_len = x_dim[1]
+        #    self.vocab_dim = x_dim[2]
+        #else:  # seq_len x vocab_dim
+        #    self.seq_len = x_dim[0]
+        #    self.vocab_dim = x_dim[1]
+        self.seq_len = x_dim[-2]
+        self.vocab_dim = x_dim[-1]
 
         if tokenizer is not None:
-            self.inpproc = InputProcessor(tokenizer, batch_size=self.batch_size, seq_len=self.seq_len, one_hot=False)
+            self.inpproc = InputProcessor(tokenizer, seq_len=self.seq_len, one_hot=False)
         self.dim = nhid
         self.encdec = ConvolutionalEncoderDecoder(x_dim=x_dim,nhid=nhid,decoder_softmax_temp=dec_softmax_temp)
         self.device = device
@@ -560,7 +562,7 @@ class VAE(nn.Module):
         self.encdec.mode = 'decode'
         decoded = self.encdec(z)
         self.encdec.mode = 'encode'
-        print(decoded.shape)
+        #print(decoded.shape)
         if self.tokenizer is not None:
             self.inpproc.mode = 'decode'
             decoded = self.inpproc(decoded)
