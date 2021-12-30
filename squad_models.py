@@ -254,7 +254,10 @@ class InputProcessor(nn.Module):
     def decode_(self,x):
         if self.one_hot:
             x = torch.round(x).int()
-            x = torch.argmax(x,dim=-1)
+            #x = torch.argmax(x,dim=-1)
+
+            # to make differentiable, use gumbel softmax... acts on the last dimension, which should be the vocab logits
+            x = torch.nn.functional.gumbel_softmax(x,hard=True)
             return x    # Returns the batch of integerized sequences
 
         else:
@@ -262,7 +265,7 @@ class InputProcessor(nn.Module):
             to_flatten = [dim for dim in x.shape[:-1]]
             decode_dims = (np.prod(to_flatten), x.shape[-1]) # flatten so each row corresponds to an embedding in a sentence/example/batch
 
-            distance = torch.matmul(x.view(decode_dims) / (torch.norm(x.view(decode_dims), dim=0) + 1e-8),
+            cos_sim = torch.matmul(x.view(decode_dims) / (torch.norm(x.view(decode_dims), dim=0) + 1e-8),
                     self.embed.weight.data.T.float() / (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(
                         tuple(to_flatten + [self.vocab_size]))
 
@@ -271,11 +274,139 @@ class InputProcessor(nn.Module):
             #             self.embed.weight.data.T.float() /
             #             (torch.norm(self.embed.weight.data.T.float(), dim=0) + 1e-8)).view(self.batch_size, self.seq_len, self.vocab_size)
 
-            nearest = torch.argmin(distance,dim=-1)
+            #nearest = torch.argmin(distance,dim=-1)
+            nearest = torch.argmax(cos_sim, dim=-1)
             return nearest
 
     def convert_tok_to_word(self, tok_result):
         return [self.tokenizer.decode(i) for i in tok_result]
+
+
+class AliasMultinomial(object):
+    """
+    Fast sampling from a multinomial distribution.
+    https://hips.seas.harvard.edu/blog/2013/03/03/the-alias-method-efficient-sampling-with-many-discrete-outcomes/
+    Code taken from: https://github.com/TropComplique/lda2vec-pytorch/blob/master/utils/alias_multinomial.py
+    """
+
+    def __init__(self, probs, device):
+        """
+        probs: a float tensor with shape [K].
+            It represents probabilities of different outcomes.
+            There are K outcomes. Probabilities sum to one.
+        """
+        self.device = device
+
+        K = len(probs)
+        self.q = t.zeros(K).to(device)
+        self.J = t.LongTensor([0] * K).to(device)
+
+        # sort the data into the outcomes with probabilities
+        # that are larger and smaller than 1/K
+        smaller = []
+        larger = []
+        for kk, prob in enumerate(probs):
+            self.q[kk] = K * prob
+            if self.q[kk] < 1.0:
+                smaller.append(kk)
+            else:
+                larger.append(kk)
+
+        # loop though and create little binary mixtures that
+        # appropriately allocate the larger outcomes over the
+        # overall uniform mixture
+        while len(smaller) > 0 and len(larger) > 0:
+            small = smaller.pop()
+            large = larger.pop()
+
+            self.J[small] = large
+            self.q[large] = (self.q[large] - 1.0) + self.q[small]
+
+            if self.q[large] < 1.0:
+                smaller.append(large)
+            else:
+                larger.append(large)
+
+        self.q.clamp(0.0, 1.0)
+        self.J.clamp(0, K - 1)
+
+    def draw(self, N):
+        """Draw N samples from the distribution."""
+
+        K = self.J.size(0)
+        r = t.LongTensor(np.random.randint(0, K, size=N)).to(self.device)
+        q = self.q.index_select(0, r).clamp(0.0, 1.0)
+        j = self.J.index_select(0, r)
+        b = t.bernoulli(q)
+        oq = r.mul(b.long())
+        oj = j.mul((1 - b).long())
+
+        return oq + oj
+
+
+class VAEInputLoss(nn.Module):
+    BETA = 0.75  # exponent to adjust sampling frequency
+    NUM_SAMPLES = 2
+
+    def __init__(self, dataset, embeddings, device):
+        super(VAEInputLoss, self).__init__()
+        self.dataset = dataset
+        self.criterion = nn.BCEWithLogitsLoss()
+        self.vocab_len = len(dataset.dictionary)
+        self.embeddings = embeddings
+        self.device = device
+
+        # Helpful values for unigram distribution generation
+        # Should use cfs instead but: https://github.com/RaRe-Technologies/gensim/issues/2574
+        self.transformed_freq_vec = t.tensor(
+            np.array([dataset.dictionary.dfs[i] for i in range(self.vocab_len)]) ** self.BETA)
+
+        self.freq_sum = t.sum(self.transformed_freq_vec)
+        # Generate table
+        self.unigram_table = self.generate_unigram_table()
+
+    def forward(self, center, context):
+        center, context = center.squeeze(), context.squeeze()  # batch_size x embed_size
+
+        # Compute true portion
+        true_scores = (center * context).sum(-1)  # batch_size
+        loss = self.criterion(true_scores, t.ones_like(true_scores))
+        # test_loss = loss.detach().item()
+
+        # Compute negatively sampled portion -
+        for i in range(self.NUM_SAMPLES):
+            samples = self.get_unigram_samples(n=center.shape[0])
+            neg_sample_scores = (center * samples).sum(-1)
+            # Update loss
+            loss += self.criterion(neg_sample_scores, t.zeros_like(neg_sample_scores))
+
+            # x3 = neg_sample_scores.clone().detach().numpy()
+            # test_loss += self.bce_loss_w_logits(x3, t.zeros_like(neg_sample_scores).numpy())
+
+        return loss  # , test_loss
+
+    @staticmethod
+    def bce_loss_w_logits(x, y):
+        max_val = np.clip(x, 0, None)
+        loss = x - x * y + max_val + np.log(np.exp(-max_val) + np.exp((-x - max_val)))
+        return loss.mean()
+
+    def get_unigram_samples(self, n):
+        """
+        Returns a sample according to a unigram distribution
+        Randomly choose a value from self.unigram_table
+        """
+        rand_idxs = self.unigram_table.draw(n).to(self.device)
+        return self.embeddings(rand_idxs).squeeze()
+
+    def get_unigram_prob(self, token_idx):
+        return (self.transformed_freq_vec[token_idx].item()) / self.freq_sum.item()
+
+    def generate_unigram_table(self):
+        # Probability at each index corresponds to probability of selecting that token
+        pdf = [self.get_unigram_prob(t_idx) for t_idx in range(0, self.vocab_len)]
+        # Generate the table from PDF
+        return AliasMultinomial(pdf, self.device)
 
 
 class BasicEncoder(nn.Module):

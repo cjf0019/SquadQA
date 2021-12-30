@@ -14,6 +14,7 @@ from itertools import chain
 import spacy
 import numpy as np
 from joblib import Parallel, delayed
+from collections import defaultdict
 
 
 EMBED_DIR = "C:\\Users\\cfavr\\gensim-data\\"
@@ -32,6 +33,12 @@ class SpacyTokenizer(object):
     def __init__(self, nlp_file=SPACY_MODEL, sentence_separation=False):
         self.nlp_file = nlp_file
         self.sentence_separation = sentence_separation
+
+        # mapping of nlp pipeline functions to words... will run each document separately
+        self.pipeline_tasks = {'num_words': self.calculate_num_words_doc,
+                               'num_sentences': self.calculate_num_sentences_doc,
+                               #'local_word_count': self.local_word_count,
+                               'global_word_count': self.add_to_global_word_count}  # could combine with local_word_count so don't do twice if returning both
         self.load_spacy_model()
 
     def tokenize(self, text, truncation=True, max_length=512,  sentence_separation='default', max_sentences=None,
@@ -93,16 +100,11 @@ class SpacyTokenizer(object):
         # Add in an additional row at the end of the weights matrix, for compatibility issues with torch.Embedding
         self.weights = torch.cat((self.weights,torch.tensor(np.zeros((1,self.weights.shape[1])))))
         self.token2hash = self.nlp_model.vocab.strings
-        #self.hash2id = {i: self.nlp_model.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp_model.vocab.strings)
-        #                    if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
-        #self.token2id = {string: self.token2hash[self.hash2id[string]] for string in list(self.nlp_model.vocab.strings)
-        #                 if string in self.nlp_model.vocab.vectors.key2row.keys()}
         self.token2id = {i: self.nlp_model.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp_model.vocab.strings)
                         if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
         self.id2token = {self.nlp_model.vocab.vectors.key2row[self.token2hash[i]]: i for i in list(self.nlp_model.vocab.strings)
                         if self.token2hash[i] in self.nlp_model.vocab.vectors.key2row.keys()}
-        #self.hash2token = {i: self.nlp_model.vocab.strings[i] for i in list(self.nlp_model.vocab.strings)
-        #                   if i in self.nlp_model.vocab.vectors.key2row.keys()}
+
         self.raw_vocab_size = len(self.token2id) #all possible tokens, regardless of if there's an embedding
         self.vocab_size = max(self.token2id.values()) + 1
         self.padding_value = self.vocab_size #set padding to one more than the final index
@@ -128,14 +130,21 @@ class SpacyTokenizer(object):
         return [self.id2token[i] for i in topidx]
 
     ######### BATCH PROCESSING FUNCTIONS ###########
-    def calculate_num_sentences(self, texts):
-        preproc_pipe = []
+    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_word_count'], batch_size=50):
+        preproc_pipe = {k: [] for k in pipeline_tasks if 'global' not in k}
+        if 'global_word_count' in pipeline_tasks:
+            try: self.global_word_count
+            except: self.global_word_count = defaultdict(lambda: 0)
+
         if isinstance(texts,str):
             texts = [texts]
         #with self.nlp_model.select_pipes(enable='sentencizer'):
         with self.nlp_model.select_pipes(enable=['tok2vec', 'parser']):
-            for doc in self.nlp_model.pipe(texts, batch_size=20):
-                preproc_pipe.append(self.calculate_num_sentences_doc(doc))
+            for doc in self.nlp_model.pipe(texts, batch_size=batch_size):
+                for task in preproc_pipe:
+                    preproc_pipe[task].append(self.pipeline_tasks[task](doc))
+            if 'global_word_count' in pipeline_tasks:
+                self.add_to_global_word_count(doc)
         return preproc_pipe
 
     def num_sentences_parallel(self, texts, chunksize=30, njobs=6):
@@ -150,6 +159,15 @@ class SpacyTokenizer(object):
         if not isinstance(doc, spacy.tokens.doc.Doc):
             doc = self.nlp_model(doc)
         return len([i for i in doc.sents])
+
+    def calculate_num_words_doc(self, doc):
+        if not isinstance(doc, spacy.tokens.doc.Doc):
+            doc = self.nlp_model(doc)
+        return len(doc)
+
+    def add_to_global_word_count(self, doc):
+        for tok in doc:
+            self.global_word_count[str(tok)] += 1
 
 
 

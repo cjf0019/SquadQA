@@ -166,11 +166,29 @@ class NLPDataset(Dataset):
 
 
     @staticmethod
-    def calculate_num_sentences(texts, tokenizer=None):
-        if tokenizer is not None and isinstance(tokenizer,SpacyTokenizer):
-            return tokenizer.calculate_num_sentences(texts)
-        else:
-            return [len(set(filter(lambda x: x != '', re.split('[.!?]', text)))) for text in texts] # if no tokenizer present, just count by splitting by a period
+    def preprocess_pipeline(df, text_col, tokenizer=None,
+                            pipeline_tasks=['num_words', 'num_sentences', 'global_word_count'], batch_size=50):
+        strcol = text_col if isinstance(text_col, str) else '+'.join(text_col)
+        if tokenizer is not None:
+            tokenizer_tasks = list(set(pipeline_tasks).intersection(set(tokenizer.pipeline_tasks)))
+            pipe_results = tokenizer.preprocess_pipeline(NLPDataset.concat_text_cols(df, text_col),
+                                                         pipeline_tasks=tokenizer_tasks, batch_size=batch_size)
+            pipeline_tasks = list(set(pipeline_tasks) - set(tokenizer_tasks)) # if a tokenizer is missing specific tasks, process in the NLPDataset class
+
+        if len(pipeline_tasks) > 0:  # for is the tokenizer does not have
+            raise NotImplementedError("""Need to go back and add processing using self.calculate_num_sentences and self.calculate_num_words.
+                The issue is I need a way to add in global_word_count as well.""")
+        return pipe_results
+
+    @staticmethod
+    def calculate_num_sentences(texts):
+        ### default function if a tokenizer without a method to calculate_num_sentences is used.
+        return [len(set(filter(lambda x: x != '', re.split('[.!?]', text)))) for text in texts] # just count by splitting by punctuation
+
+    @staticmethod
+    def calculate_num_words(texts):
+        ### default function if a tokenizer without a method to calculate_num_sentences is used.
+        return [len(set(filter(lambda x: x != '', text.split()))) for text in texts]
 
     @staticmethod
     def calculate_num_sentences_textcol(df, text_col, tokenizer=None):
@@ -206,6 +224,91 @@ class NLPDataset(Dataset):
             if col+'NumSentences' not in self.df.columns:
                 self.df = self.calculate_num_sentences_df(self.df, self.tokenizer, col)
         return
+
+
+class SkipGramDataset(Dataset):
+    def __init__(self, df, already_toked=False, args=None):
+        self.args = args if args is not None else SkipGramArgs()
+        self.__dict__.update(self.args.__dict__)
+        self.df = df.copy()
+        self.already_toked = already_toked  ### !!! NOT IMPLEMENTED: Assumed True at the moment
+
+        ### Load in the codes, and collect frequency information/form a dictionary from the df
+        self.codes = Codes(self.df, code_types=self.code_types, dx_dict=self.dx_dict, \
+                           proc_dict=self.proc_dict, rm_bottom_n=self.rm_bottom_n, \
+                           code_dict_file=self.code_dict_file, conn=self.conn)
+        self.__dict__.update(self.codes.__dict__)
+
+        ### Get a count of the DX's per row, as wells the cumulative count (for indexing inter-row)
+        # self.df['Context_Count'] = min(self.df['DX_Count'] * 2 * self.args.window_size, \
+        #                                  (self.df['DX_Count'] - 1) * self.df['DX_Count']) # Number of dx -context pairs contained in the row for the given window size
+
+        self.df['Count_PreSubSample'] = self.df['Codes'].transform(len)
+        self.df = self.df[self.df['Count_PreSubSample'] > 0]
+
+        self.df['Context_Count_PreSubSample'] = (self.df['Count_PreSubSample'] * \
+                                                 (self.df['Count_PreSubSample'] - 1)) / 2
+        self.df['IDX_Range_PreSubSample'] = self.df['Context_Count_PreSubSample'].cumsum()
+
+        print("Performing Sub-sampling")
+        # Perform subsampling to reduce highly frequent codes
+        self.df['Codes'] = self.df['Codes'].transform(lambda row: \
+                                                          [code for code in row if self.subsample_frequent(code)])
+        self.df['Word_Count'] = self.df['Codes'].transform(len)
+        self.df = self.df[self.df['Word_Count'] > 0]
+
+        self.df['Context_Count'] = (self.df['Word_Count'] * (self.df['Word_Count'] - 1)) / 2
+        mean_contexts_lost = (self.df['Context_Count_PreSubSample'] - self.df['Context_Count']).mean()
+        print("Average of {} contexts lost per record after Sub-sampling.". \
+              format(str(np.round(mean_contexts_lost))))
+
+        self.df['IDX_Range'] = self.df['Context_Count'].cumsum().astype(int)
+
+        if self.shuffle_codes:
+            print("Shuffling codes inside each row.")
+            self.df['Codes'].transform(random.shuffle)
+
+        self.generate_examples_serial()
+
+    def __len__(self):
+        return self.df.iloc[-1]['IDX_Range']
+
+    def __getitem__(self, index):
+        return self._example_to_tensor(*self.examples[index])
+
+    def generate_examples_serial(self):
+        """
+        Generates examples with no multiprocessing - straight through!
+        :return: None - updates class properties
+        """
+        self.examples = []
+        for row in tqdm(self.df['Codes'],
+                        desc="Generating Examples (serial)"):  ### If adding Proc codes, should make into iterrows, so can access both columns
+            self.examples.extend(self._generate_examples_from_row(row))
+
+    def subsample_frequent(self, code):
+        f = self.dictionary.dfs[self.dictionary.token2id[code]] / self.freq_sum
+        subsamp_freq = 1 - np.sqrt(0.001 / f)
+        return subsamp_freq < random.random()
+
+    def _generate_examples_from_row(self, row):
+        """
+        Generate all examples from a file within window size
+        :param file: File from self.files
+        :returns: List of examples
+        """
+        combs = list(combinations([self.dictionary.token2id[i] for i in row], 2))
+        return combs
+
+    def _example_to_tensor(self, center, target):
+        """
+        Takes raw example and turns it into tensor values
+        :params example: Tuple of form: (center word, document id)
+        :params target: String of the target word
+        :returns: A tuple of tensors
+        """
+        center, target = torch.tensor([int(center)]), torch.tensor([int(target)])
+        return center, target
 
 
 class SquadDataset(Dataset):
