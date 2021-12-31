@@ -38,7 +38,11 @@ class SpacyTokenizer(object):
         self.pipeline_tasks = {'num_words': self.calculate_num_words_doc,
                                'num_sentences': self.calculate_num_sentences_doc,
                                #'local_word_count': self.local_word_count,
-                               'global_word_count': self.add_to_global_word_count}  # could combine with local_word_count so don't do twice if returning both
+                               'global_word_count': self.add_to_global_word_count,
+                               'global_embed_mean': self.add_to_global_mean_calc,
+                               'global_embed_covariance': self.add_to_global_covariance_calc
+                               }  # could combine with local_word_count so don't do twice if returning both
+        self.summary_statistics = {}
         self.load_spacy_model()
 
     def tokenize(self, text, truncation=True, max_length=512,  sentence_separation='default', max_sentences=None,
@@ -130,21 +134,27 @@ class SpacyTokenizer(object):
         return [self.id2token[i] for i in topidx]
 
     ######### BATCH PROCESSING FUNCTIONS ###########
-    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_word_count'], batch_size=50):
+    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_word_count','global_embed_mean'], batch_size=50):
         preproc_pipe = {k: [] for k in pipeline_tasks if 'global' not in k}
-        if 'global_word_count' in pipeline_tasks:
-            try: self.global_word_count
-            except: self.global_word_count = defaultdict(lambda: 0)
-
         if isinstance(texts,str):
             texts = [texts]
+
         #with self.nlp_model.select_pipes(enable='sentencizer'):
         with self.nlp_model.select_pipes(enable=['tok2vec', 'parser']):
             for doc in self.nlp_model.pipe(texts, batch_size=batch_size):
                 for task in preproc_pipe:
                     preproc_pipe[task].append(self.pipeline_tasks[task](doc))
-            if 'global_word_count' in pipeline_tasks:
-                self.add_to_global_word_count(doc)
+
+                # any summary statistics designated by 'global'
+                for summ_stat in list(filter(lambda x: 'global' in x and 'covariance' not in x, pipeline_tasks)):
+                    self.pipeline_tasks[summ_stat](doc)
+
+            if 'global_embed_mean' in pipeline_tasks:
+                self.calc_global_embed_mean()
+            if 'global_embed_covariance' in pipeline_tasks:
+                for doc in self.nlp_model.pipe(texts, batch_size=batch_size):  # run through the pipe again for covariance, now that the mean is present
+                    self.pipeline_tasks[summ_stat](doc)
+                self.calc_global_embed_covariance()
         return preproc_pipe
 
     def num_sentences_parallel(self, texts, chunksize=30, njobs=6):
@@ -166,8 +176,43 @@ class SpacyTokenizer(object):
         return len(doc)
 
     def add_to_global_word_count(self, doc):
+        if 'global_word_count' not in self.summary_statistics:
+            self.summary_statistics['global_word_count'] = defaultdict(lambda: 0)
         for tok in doc:
-            self.global_word_count[str(tok)] += 1
+            self.summary_statistics['global_word_count'] += 1
+        return
+
+    def add_to_global_mean_calc(self, doc):
+        if 'global_embed_mean' not in self.summary_statistics:
+            self.summary_statistics['global_embed_sum'] = torch.zeros(self.weights.shape[-1])
+
+        if 'global_word_count' not in self.summary_statistics:  # need to calculate this anyways in order to get the final mean (total count used for final mean calc)
+            self.summary_statistics['global_word_count'] = defaultdict(lambda: 0)
+
+        if 'global_word_count_total' not in self.summary_statistics:
+            self.summary_statistics['global_word_count_total'] = 0
+
+        for tok in doc:
+            self.summary_statistics['global_word_count'] += 1
+            self.summary_statistics['global_word_count_total'] += 1
+            self.summary_statistics['global_embed_sum'] += tok.vector
+
+    def add_to_global_covariance_calc(self, doc):
+        if 'global_embed_mean' not in self.summary_statistics:
+            raise Exception('Embedding mean not calculated ahead of the covariance matrix calculation!')
+        embed_mean = self.summary_statistics['global_embed_mean']
+        if 'global_embed_cov_sum' not in self.summary_statistics:
+            self.summary_statistics['global_embed_cov_sum'] = torch.zeros(self.weights.shape[-1])
+        for tok in doc:
+            mean_diff = tok.vector - embed_mean
+            cov_mat = torch.outer(mean_diff,mean_diff)
+            self.summary_statistics['global_embed_cov_sum'] += cov_mat
+
+    def calc_global_embed_mean(self):
+        self.summary_statistics['global_embed_mean'] = self.summary_statistics['global_embed_sum']/self.summary_statistics['global_word_count_total']
+
+    def calc_global_embed_covariance(self):
+        self.summary_statistics['global_embed_covariance'] = self.summary_statistics['global_embed_cov_sum']/(self.summary_statistics['global_word_count_total']-1)
 
 
 
