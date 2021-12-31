@@ -134,12 +134,13 @@ class SpacyTokenizer(object):
         return [self.id2token[i] for i in topidx]
 
     ######### BATCH PROCESSING FUNCTIONS ###########
-    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_word_count','global_embed_mean'], batch_size=50):
+    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_embed_mean','global_embed_covariance'], batch_size=50):
         preproc_pipe = {k: [] for k in pipeline_tasks if 'global' not in k}
         if isinstance(texts,str):
             texts = [texts]
 
         #with self.nlp_model.select_pipes(enable='sentencizer'):
+        store_docs = []   # needed for the covariance calculation, to prevent having to run the nlp pipeline twice
         with self.nlp_model.select_pipes(enable=['tok2vec', 'parser']):
             for doc in self.nlp_model.pipe(texts, batch_size=batch_size):
                 for task in preproc_pipe:
@@ -149,11 +150,13 @@ class SpacyTokenizer(object):
                 for summ_stat in list(filter(lambda x: 'global' in x and 'covariance' not in x, pipeline_tasks)):
                     self.pipeline_tasks[summ_stat](doc)
 
+                store_docs.append(doc)
+
             if 'global_embed_mean' in pipeline_tasks:
                 self.calc_global_embed_mean()
             if 'global_embed_covariance' in pipeline_tasks:
-                for doc in self.nlp_model.pipe(texts, batch_size=batch_size):  # run through the pipe again for covariance, now that the mean is present
-                    self.pipeline_tasks[summ_stat](doc)
+                for doc in store_docs:  # run through the docs again for covariance, now that the mean is present
+                    self.pipeline_tasks['global_embed_covariance'](doc)
                 self.calc_global_embed_covariance()
         return preproc_pipe
 
@@ -179,21 +182,28 @@ class SpacyTokenizer(object):
         if 'global_word_count' not in self.summary_statistics:
             self.summary_statistics['global_word_count'] = defaultdict(lambda: 0)
         for tok in doc:
-            self.summary_statistics['global_word_count'] += 1
+            self.summary_statistics['global_word_count'][tok] += 1
         return
 
     def add_to_global_mean_calc(self, doc):
-        if 'global_embed_mean' not in self.summary_statistics:
+        if 'global_embed_sum' not in self.summary_statistics:
             self.summary_statistics['global_embed_sum'] = torch.zeros(self.weights.shape[-1])
+        if 'global_word_count_total' not in self.summary_statistics:
+            self.summary_statistics['global_word_count_total'] = 0
 
-        if 'global_word_count' not in self.summary_statistics:  # need to calculate this anyways in order to get the final mean (total count used for final mean calc)
-            self.summary_statistics['global_word_count'] = defaultdict(lambda: 0)
+        word_ct = len(doc)
+        self.summary_statistics['global_word_count_total'] += word_ct
+        self.summary_statistics['global_embed_sum'] += doc.vector * word_ct
+
+    def add_to_global_mean_calc_TOKENFORLOOP(self, doc):
+        if 'global_embed_sum' not in self.summary_statistics:
+            self.summary_statistics['global_embed_sum'] = torch.zeros(self.weights.shape[-1])
 
         if 'global_word_count_total' not in self.summary_statistics:
             self.summary_statistics['global_word_count_total'] = 0
 
         for tok in doc:
-            self.summary_statistics['global_word_count'] += 1
+            #self.summary_statistics['global_word_count'][tok] += 1
             self.summary_statistics['global_word_count_total'] += 1
             self.summary_statistics['global_embed_sum'] += tok.vector
 
@@ -202,9 +212,9 @@ class SpacyTokenizer(object):
             raise Exception('Embedding mean not calculated ahead of the covariance matrix calculation!')
         embed_mean = self.summary_statistics['global_embed_mean']
         if 'global_embed_cov_sum' not in self.summary_statistics:
-            self.summary_statistics['global_embed_cov_sum'] = torch.zeros(self.weights.shape[-1])
+            self.summary_statistics['global_embed_cov_sum'] = torch.zeros((self.weights.shape[-1],self.weights.shape[-1]))
         for tok in doc:
-            mean_diff = tok.vector - embed_mean
+            mean_diff = torch.tensor(tok.vector) - embed_mean
             cov_mat = torch.outer(mean_diff,mean_diff)
             self.summary_statistics['global_embed_cov_sum'] += cov_mat
 

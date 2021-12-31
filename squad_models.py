@@ -172,9 +172,8 @@ class SquadModel_VAE(pl.LightningModule):
         return AdamW(self.parameters(), lr=0.001)
 
 
-
 class InputProcessor(nn.Module):
-    def __init__(self, tokenizer, x_dim=512, seq_len=512, one_hot=True, pad_idx=20000, agg_seq=False, calculate_loss=False):
+    def __init__(self, tokenizer, x_dim=512, seq_len=512, one_hot=True, pad_idx=20000, agg_seq=False):
         """
         Switch back and forth between a integerized inputs (corresponding to vocab)
         and embeddings/one-hot.
@@ -205,7 +204,7 @@ class InputProcessor(nn.Module):
         self.x_non_vocab_size = x_dim - self.vocab_size # inputs that aren't in the vocabulary
         self.pad_idx = pad_idx
         self.one_hot = one_hot
-        self.calculate_loss = calculate_loss
+        #self.calculate_loss = calculate_loss
         if not self.one_hot:
             #if self.embed_model is None:
             #    self.embed_model = gensim.downloader.load("glove-wiki-gigaword-300")
@@ -353,51 +352,55 @@ class NegativeSamplingLoss(nn.Module):
     BETA = 0.75
     NUM_SAMPLES = 2
 
-    def __init__(self, tokenizer, embeddings, device):
+    def __init__(self, tokenizer, neg_samp_embed_loc=None, neg_samp_embed_cov=None, device='cpu'):
         super(NegativeSamplingLoss, self).__init__()
         self.tokenizer = tokenizer
         self.criterion = nn.BCEWithLogitsLoss()
-        self.vocab_len = len(tokenizer.global_word_count)
-        self.embeddings = embeddings
+        self.embeddings = tokenizer.weights
         self.device = device
 
-        # Helpful values for unigram distribution generation
-        # Should use cfs instead but: https://github.com/RaRe-Technologies/gensim/issues/2574
-        self.transformed_freq_vec = torch.tensor(
-            np.array(list(tokenizer.global_word_count.values())) ** self.BETA)
+        if 'global_embed_mean' in tokenizer.summary_statistics or neg_samp_embed_loc is not None:
+            embed_mean = tokenizer.summary_statistics['global_embed_mean'] if neg_samp_embed_loc is None else neg_samp_embed_loc
+            embed_cov = neg_samp_embed_cov if 'global_embed_covariance' not in tokenizer.summary_statistics \
+                                            else tokenizer.summary_statistics['global_embed_covariance']
 
-        self.freq_sum = torch.sum(self.transformed_freq_vec)
-        # Generate table
-        self.unigram_table = self.generate_unigram_table()
+            self.multivariate_normal_sampler = torch.distributions.MultivariateNormal(embed_mean, embed_cov)
+            self.sample_mode = 'multivariate_normal'
 
+        elif 'global_word_count' in tokenizer.summary_statistics:
+            self.vocab_len = len(tokenizer.summary_statistics['global_word_count'])
+            self.transformed_freq_vec = torch.tensor(
+                np.array(list(tokenizer.summary_statistics['global_word_count'].values())) ** self.BETA)
 
-    def forward(self, center, context):
-        center, context = center.squeeze(), context.squeeze()  # batch_size x embed_size
+            self.freq_sum = torch.sum(self.transformed_freq_vec)
+            # Generate table
+            self.unigram_table = self.generate_unigram_table()
+            self.sample_mode = 'unigram'
+
+    def forward(self, predicted, target):
+        predicted, target = predicted.squeeze(), target.squeeze()  # batch_size x embed_size
 
         # Compute true portion
-        true_scores = (center * context).sum(-1)  # batch_size
+        true_scores = (predicted * target).sum(-1)  # batch_size
         loss = self.criterion(true_scores, torch.ones_like(true_scores))
-        # test_loss = loss.detach().item()
 
         # Compute negatively sampled portion -
         for i in range(self.NUM_SAMPLES):
-            samples = self.get_unigram_samples(n=center.shape[0])
-            neg_sample_scores = (center * samples).sum(-1)
+            samples = self.get_samples(n=predicted.shape[0])
+            neg_sample_scores = (predicted * samples).sum(-1)
             # Update loss
             loss += self.criterion(neg_sample_scores, torch.zeros_like(neg_sample_scores))
 
-            # x3 = neg_sample_scores.clone().detach().numpy()
-            # test_loss += self.bce_loss_w_logits(x3, t.zeros_like(neg_sample_scores).numpy())
+        return loss
 
-        return loss  # , test_loss
+    def get_samples(self, n):
+        if self.sample_mode == 'unigram':
+            return self.get_unigram_samples(n)
+        else:
+            return self.get_multivariate_normal_samples(n)
 
-
-    @staticmethod
-    def bce_loss_w_logits(x, y):
-        max_val = np.clip(x, 0, None)
-        loss = x - x * y + max_val + np.log(np.exp(-max_val) + np.exp((-x - max_val)))
-        return loss.mean()
-
+    def get_multivariate_normal_samples(self,n):
+        return self.multivariate_normal_sampler.sample((n,))
 
     def get_unigram_samples(self, n):
         """
@@ -407,10 +410,8 @@ class NegativeSamplingLoss(nn.Module):
         rand_idxs = self.unigram_table.draw(n).to(self.device)
         return self.embeddings(rand_idxs).squeeze()
 
-
     def get_unigram_prob(self, token_idx):
         return (self.transformed_freq_vec[token_idx].item()) / self.freq_sum.item()
-
 
     def generate_unigram_table(self):
         # Probability at each index corresponds to probability of selecting that token
@@ -418,6 +419,11 @@ class NegativeSamplingLoss(nn.Module):
         # Generate the table from PDF
         return AliasMultinomial(pdf, self.device)
 
+    @staticmethod
+    def bce_loss_w_logits(x, y):
+        max_val = np.clip(x, 0, None)
+        loss = x - x * y + max_val + np.log(np.exp(-max_val) + np.exp((-x - max_val)))
+        return loss.mean()
 
 
 
@@ -735,8 +741,9 @@ class ConvolutionalEncoderDecoder(nn.Module):
         return (int(round(self.conv3dim)), int(round(self.conv3tdim)))
 
 
+
 class VAE(nn.Module):
-    def __init__(self, tokenizer=None, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
+    def __init__(self, tokenizer=None, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu', mode='train'):
         super(VAE, self).__init__()
         self.x_dim=x_dim
         self.tokenizer = tokenizer
