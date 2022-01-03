@@ -154,8 +154,10 @@ class NLPDataset(Dataset):
                 strcol = col if isinstance(col,str) else '+'.join(col) # for cases where a tuple or list of columns is supplied, such that their text will be grouped together
                 print(f"... Indexing {strcol} ...")
                 idx_starts[strcol] = idx_start
-                if '_NumSentences' not in self.df.columns:
-                    self.df = self.calculate_num_sentences_textcol(self.df, col, self.tokenizer)
+                if strcol+'_NumSentences' not in self.df.columns:
+                    pipeline_results = self.preprocess_pipeline(self.df, col, tokenizer=self.tokenizer, pipeline_tasks=['num_sentences'])
+                    #self.df = self.calculate_num_sentences_textcol(self.df, col, self.tokenizer)
+                    self.df[strcol+'_NumSentences'] = pipeline_results['num_sentences']
                 self.df[strcol + '_IDX_Start'] = self.df[strcol + '_NumSentences'].cumsum() + idx_start
                 #else:
                 #    self.df[col + '_IDX_Start'] = self.df[col].cum_sum() + idx_start
@@ -167,7 +169,7 @@ class NLPDataset(Dataset):
 
     @staticmethod
     def preprocess_pipeline(df, text_col, tokenizer=None,
-                            pipeline_tasks=['num_words', 'num_sentences', 'global_word_count'], batch_size=50):
+                            pipeline_tasks=['num_words', 'num_sentences'], batch_size=50):
         strcol = text_col if isinstance(text_col, str) else '+'.join(text_col)
         if tokenizer is not None:
             tokenizer_tasks = list(set(pipeline_tasks).intersection(set(tokenizer.pipeline_tasks)))

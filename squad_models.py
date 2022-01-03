@@ -743,17 +743,41 @@ class ConvolutionalEncoderDecoder(nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, tokenizer=None, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu', mode='train'):
+    def __init__(self, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
+        super(VAE, self).__init__()
+        self.x_dim=x_dim
+        self.dim = nhid
+        self.encdec = ConvolutionalEncoderDecoder(x_dim=x_dim,nhid=nhid,decoder_softmax_temp=dec_softmax_temp)
+        self.device = device
+
+    def sampling(self, mean, logvar):
+        eps = torch.randn(mean.shape).to(self.device)
+        sigma = 0.5 * torch.exp(logvar)
+        return mean + eps * sigma
+
+    def forward(self, x):
+        mean, logvar = self.encdec(x)
+        z = self.sampling(mean, logvar)
+        self.encdec.mode = 'decode'
+        decoded = self.encdec(z)
+        self.encdec.mode = 'encode'
+        return decoded, mean, logvar
+
+    def generate(self, batch_size=None):
+        z = torch.randn((batch_size, self.dim)).to(self.device) if batch_size else torch.randn((1, self.dim)).to(self.device)
+        self.encdec.mode = 'decode'
+        res = self.encdec(z)
+        if not batch_size:
+            res = res.squeeze(0)
+        self.encdec.mode = 'encode'
+        return res
+
+
+class VAE_ProcessingIncluded(nn.Module):
+    def __init__(self, tokenizer=None, x_dim=(512,32128), nhid=50, dec_softmax_temp=0.01, device='cpu'):
         super(VAE, self).__init__()
         self.x_dim=x_dim
         self.tokenizer = tokenizer
-        #if len(x_dim) == 3:  # batch_size x seq_len x vocab_dim
-        #    self.batch_size = x_dim[0]
-        #    self.seq_len = x_dim[1]
-        #    self.vocab_dim = x_dim[2]
-        #else:  # seq_len x vocab_dim
-        #    self.seq_len = x_dim[0]
-        #    self.vocab_dim = x_dim[1]
         self.seq_len = x_dim[-2]
         self.vocab_dim = x_dim[-1]
 
