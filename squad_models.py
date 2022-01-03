@@ -99,43 +99,55 @@ class SquadModel(pl.LightningModule):
 
 
 class SquadModel_VAE(pl.LightningModule):
-    def __init__(self):
+    def __init__(self, tokenizer, x_dim, beta=1.0, neg_samp_embed_loc=None, neg_samp_embed_cov=None):
         super().__init__()
-        self.model = VAE(shape=(512,200001), nhid=50, dec_softmax_temp=0.01)
+        self.tokenizer = tokenizer
+        self.seq_len = x_dim[-2]
+        self.vocab_dim = x_dim[-1]
 
-    def forward(self, input_ids, attention_mask, labels=None):
-        output = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels
-        )
+        if tokenizer is not None:
+            self.inpproc = InputProcessor(tokenizer, seq_len=self.seq_len, one_hot=False)
+        self.model = VAE(x_dim=(128,300), nhid=100, dec_softmax_temp=0.01)   # x_dim is of seq_len x embed_dim... might want to make more clear
+        self.loss_model = NegativeSamplingLoss(tokenizer, neg_samp_embed_loc=neg_samp_embed_loc, neg_samp_embed_cov=neg_samp_embed_cov)
+        self.beta = beta # mult constant on the kl divergence loss
 
-        return output.loss, output.logits
+    def forward(self, x):
+        if self.tokenizer is not None:
+            x = self.inpproc(x) # convert input_ids to word embeddings
+
+        output, mean, logvar = self.model(x)
+
+        ### !!! The loss model takes one word (batched) at a time... need to modify either this or the loss model to do sentences
+        loss = self.loss_model(output, x)
+        kl_loss = self.kl_divergence(mean, logvar)
+        loss += kl_loss
+
+        if self.tokenizer is not None:  #convert back into tok integers
+            self.inpproc.mode = 'decode'
+            output = self.inpproc(output)
+            self.inpproc.mode = 'encode'
+        return output, loss
 
     def training_step(self, batch, batch_idx):
         input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        loss, outputs = self(input_ids, attention_mask, labels)
+        outputs, loss = self(input_ids)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        ans_pred_col = "val_ans_pred_epoch_{}".format(str(self.current_epoch))
-        if ans_pred_col not in self.data_module.test_df.columns:
-            self.data_module.test_df[ans_pred_col] = ''
+        #ans_pred_col = "val_ans_pred_epoch_{}".format(str(self.current_epoch))
+        #if ans_pred_col not in self.data_module.test_df.columns:
+        #    self.data_module.test_df[ans_pred_col] = ''
         input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        row_ids = batch['Row_ID'].detach().numpy()
-        loss, outputs = self(input_ids, attention_mask, labels)
+        #row_ids = batch['Row_ID'].detach().numpy()
+        outputs, loss = self(input_ids)
 
         self.log('val_loss', loss, prog_bar=True, logger=True)
         # self.generate_answers(input_ids,batch['Row_ID'].values,len(labels))
-        if self.generate_text:
-            generation_output = self.model.generate(torch.tensor(input_ids), max_length=self.max_label_len)
-            answers = [self.tokenizer.decode(i) for i in generation_output.detach().numpy()]
-            self.data_module.test_df.loc[row_ids, ans_pred_col] = answers
+        #if self.generate_text:
+        #    generation_output = self.model.generate(torch.tensor(input_ids), max_length=self.max_label_len)
+        #    answers = [self.tokenizer.decode(i) for i in generation_output.detach().numpy()]
+        #    self.data_module.test_df.loc[row_ids, ans_pred_col] = answers
 
         # self.data_module.test_df.loc[row_ids,ans_pred_col] = \
         #                    generate_answers(input_ids,\
@@ -144,20 +156,18 @@ class SquadModel_VAE(pl.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        ans_pred_col = "test_ans_pred_epoch_{}".format(str(self.current_epoch))
-        if ans_pred_col not in self.data_module.test_df.columns:
-            self.data_module.test_df[ans_pred_col] = ''
+        #ans_pred_col = "test_ans_pred_epoch_{}".format(str(self.current_epoch))
+        #if ans_pred_col not in self.data_module.test_df.columns:
+        #    self.data_module.test_df[ans_pred_col] = ''
         input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        row_ids = batch['Row_ID'].detach().numpy()
-        loss, outputs = self(input_ids, attention_mask, labels)
+        #row_ids = batch['Row_ID'].detach().numpy()
+        loss, outputs = self(input_ids)
         self.log('test_loss', loss, prog_bar=True, logger=True)
 
-        if self.generate_text:
-            generation_output = self.model.generate(torch.tensor(input_ids), max_length=self.max_label_len)
-            answers = [self.tokenizer.decode(i) for i in generation_output.detach().numpy()]
-            self.data_module.test_df.loc[row_ids, ans_pred_col] = answers
+        #if self.generate_text:
+        #    generation_output = self.model.generate(torch.tensor(input_ids), max_length=self.max_label_len)
+        #    answers = [self.tokenizer.decode(i) for i in generation_output.detach().numpy()]
+        #    self.data_module.test_df.loc[row_ids, ans_pred_col] = answers
         # generate_answers(input_ids,\
         # 50,self.model,input_col='context',tokenize_input=False)
         # self.generate_answers(input_ids,batch['Row_ID'].values,len(labels))
@@ -170,6 +180,11 @@ class SquadModel_VAE(pl.LightningModule):
 
     def configure_optimizers(self):
         return AdamW(self.parameters(), lr=0.001)
+
+    @staticmethod
+    def kl_divergence(mean, logvar, beta=1.0):
+        KL_divergence = 0.5 * torch.sum(-1 - logvar + torch.exp(logvar) + mean ** 2)
+        return beta * KL_divergence
 
 
 class InputProcessor(nn.Module):
@@ -253,7 +268,7 @@ class InputProcessor(nn.Module):
 
     def decode_(self,x):
         if self.one_hot:
-            x = torch.round(x).int()
+            #x = torch.round(x).int()
             #x = torch.argmax(x,dim=-1)
 
             # to make differentiable, use gumbel softmax... acts on the last dimension, which should be the vocab logits
@@ -386,28 +401,28 @@ class NegativeSamplingLoss(nn.Module):
 
         # Compute negatively sampled portion -
         for i in range(self.NUM_SAMPLES):
-            samples = self.get_samples(n=predicted.shape[0])
+            samples = self.get_samples(n_shape=tuple(predicted.shape[:-1]))
             neg_sample_scores = (predicted * samples).sum(-1)
             # Update loss
             loss += self.criterion(neg_sample_scores, torch.zeros_like(neg_sample_scores))
 
         return loss
 
-    def get_samples(self, n):
+    def get_samples(self, n_shape):
         if self.sample_mode == 'unigram':
-            return self.get_unigram_samples(n)
+            return self.get_unigram_samples(n_shape)
         else:
-            return self.get_multivariate_normal_samples(n)
+            return self.get_multivariate_normal_samples(n_shape)
 
-    def get_multivariate_normal_samples(self,n):
-        return self.multivariate_normal_sampler.sample((n,))
+    def get_multivariate_normal_samples(self,n_shape):
+        return self.multivariate_normal_sampler.sample(n_shape)
 
-    def get_unigram_samples(self, n):
+    def get_unigram_samples(self, n_shape):
         """
         Returns a sample according to a unigram distribution
         Randomly choose a value from self.unigram_table
         """
-        rand_idxs = self.unigram_table.draw(n).to(self.device)
+        rand_idxs = self.unigram_table.draw(n_shape).to(self.device)
         return self.embeddings(rand_idxs).squeeze()
 
     def get_unigram_prob(self, token_idx):
@@ -679,6 +694,7 @@ class ConvolutionalEncoderDecoder(nn.Module):
         if len(x_shape) == 4:
             x = x.view((x.shape[0]*x.shape[1],x.shape[2],x.shape[3])) # if each sample is broken into sentences, combine batch and sentences into one dimension
 
+        print("XHSAPE",x.shape)
         x = x.permute(0, 2, 1).float()  # batch_size*num_sentences x seq_len x vocab/embed_dim
         x = self.conv1(x)
         x = self.conv2(x)

@@ -119,7 +119,7 @@ class NLPDataset(Dataset):
                 df_idx = example['df_row_idx']
                 idx_start = self.df.iloc[df_idx][label+'_IDX_Start']
                 sent_ind = int(idx - idx_start)
-                example = {text+'_Sent_'+str(sent_ind): example[text+'_input_ids'][sent_ind]}
+                example = {'input_ids': example[text+'_input_ids'][sent_ind], 'row_id': df_idx, 'sentence_id': idx, 'text_field': label}
 
         return example
 
