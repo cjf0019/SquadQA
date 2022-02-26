@@ -352,8 +352,18 @@ def setup_input_and_run_model(data_module,model,raw_sample=None):
     return example, loss, logits
 
 
+def convert_inttokens_to_text(int_tokens):
+    if len(int_tokens.shape) == 2:
+        text = ' '.join([str(i) for i in int_tokens[0].detach().numpy()])
+        for sent in int_tokens[1:]:
+            text += ' + ' + ' '.join([str(i) for i in sent.detach().numpy()])
+    else:
+        text = ' '.join([str(i) for i in int_tokens.detach().numpy()])
+    return text
+
+
 def tokenize_to_dict(tokenizer, text, output_len, sentence_separation='default', max_sentences=None,
-                     text_label=None, make_pad_negative=False):
+                     text_label=None, make_pad_negative=False, return_tokens_as_str=False):
     text_label = '' if text_label is None else text_label
     encodings = tokenizer(text, truncation=True, max_length=output_len, sentence_separation=sentence_separation,
                           max_sentences=max_sentences, padding="max_length", add_special_tokens=True, return_tensors='pt')
@@ -362,7 +372,10 @@ def tokenize_to_dict(tokenizer, text, output_len, sentence_separation='default',
         input_ids[input_ids == 0] = -100
         encodings['input_ids'] = input_ids
 
-    encodings[(text_label+'_input_ids').lstrip('_')] = encodings.pop('input_ids')
+    tok_return = encodings.pop('input_ids')
+    if return_tokens_as_str:
+        tok_return = convert_inttokens_to_text(tok_return)
+    encodings[(text_label+'_input_ids').lstrip('_')] = tok_return
     if 'attention_mask' in encodings.keys():
         encodings[(text_label+'_attention_mask').lstrip('_')] = encodings.pop('attention_mask')
     return encodings

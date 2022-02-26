@@ -8,16 +8,20 @@ Created on Sun May 16 15:38:19 2021
 
 import torch
 import transformers
+import pandas as pd
 import datasets
 import pytorch_lightning as pl
 from torch.utils.data import Dataset, DataLoader
 from squad_utilities import tokenize_to_dict, SpacyTokenizer
 from itertools import chain
 import re
+import csv
+import os
 
 class NLPDataset(Dataset):
     def __init__(self, df, tokenizer, text_cols=[], sentence_len=128, negative_pads=False,
-                 sentence_separation=True, aggregate_by='row', separate_cols_on_return=True):
+                 sentence_separation=True, aggregate_by='row', separate_cols_on_return=True,
+                 processed_file='processed_squad_train.csv'):
         """
         Run through a dataframe with one or multiple columns of text. For each included column, return the tokenized text
         as a separate item.
@@ -57,6 +61,9 @@ class NLPDataset(Dataset):
         #    self.count_sentences(self.text_cols)
 
         self.idx_starts = self.index_text_samples(text_cols)
+        self.already_tokenized = False
+        self.processed_file = processed_file
+        self.setup()
 
 
     def retrieve_text(self, idx):
@@ -100,28 +107,59 @@ class NLPDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        ### First retrieve the text block relative to the index.
-        example = self.retrieve_text(idx) # returns dict of text_col names to the text... concatenation of multiple cols also returned
+        if self.already_tokenized:
+            return self.toked_df[['input_ids', 'row_id', 'sentence_id', 'text_field']].iloc[idx]
 
-        ### TOKENIZE
-        if self.run_tokenizer_on_output:
-            text_fields = [i for i in example.keys() if i in self.text_cols]
-            for text in text_fields:
-                example.update(tokenize_to_dict(self.tokenizer, example[text], self.sentence_len,
-                                                 sentence_separation=True, text_label=text,
-                                                 make_pad_negative=self.negative_pads))
+        else:
+            ### First retrieve the text block relative to the index.
+            example = self.retrieve_text(idx) # returns dict of text_col names to the text... concatenation of multiple cols also returned
 
-            ### If extracting by specific sentence
-            if self.aggregate_by == 'sentence':
-                ##!!!!!! NEED TO FIND THE GLOBAL IDX FOR THE SENTENCE
-                label = list(example.keys())[0].replace('_input_ids','')
-                text_col_idx_start = self.idx_starts[label]
-                df_idx = example['df_row_idx']
-                idx_start = self.df.iloc[df_idx][label+'_IDX_Start']
-                sent_ind = int(idx - idx_start)
-                example = {'input_ids': example[text+'_input_ids'][sent_ind], 'row_id': df_idx, 'sentence_id': idx, 'text_field': label}
+            ### TOKENIZE
+            if self.run_tokenizer_on_output:
+                text_fields = [i for i in example.keys() if i in self.text_cols]
+                for text in text_fields:
+                    toked = tokenize_to_dict(self.tokenizer, example[text], self.sentence_len,
+                                            sentence_separation=True, text_label=text,
+                                             make_pad_negative=self.negative_pads, return_tokens_as_str=True)
 
-        return example
+                    example.update(toked)
+
+                ### If extracting by specific sentence
+                if self.aggregate_by == 'sentence':
+                    ##!!!!!! NEED TO FIND THE GLOBAL IDX FOR THE SENTENCE
+                    label = list(example.keys())[0].replace('_input_ids','')
+                    sents = example[text+'_input_ids'].split(' + ')
+                    text_col_idx_start = self.idx_starts[label]
+                    df_idx = example['df_row_idx']
+                    idx_start = self.df.iloc[df_idx][label+'_IDX_Start']
+                    sent_ind = int(idx - idx_start)
+                    #example = {'input_ids': example[text+'_input_ids'][sent_ind], 'row_id': df_idx, 'sentence_id': idx, 'text_field': label}
+                    example = {'input_ids': sents[sent_ind], 'row_id': df_idx, 'sentence_id': idx, 'text_field': label}
+            return example
+
+    def __iter__(self):
+        for idx in range(len(self)):
+            toked = self[idx]
+            yield toked
+
+
+    def setup(self):
+        #pipe_results = pd.DataFrame(iter(self))
+        #self.toked_df = pipe_results
+        if self.processed_file in os.listdir():
+            return
+        header = True
+        with open(self.processed_file, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter='\t',
+                                quotechar='|', quoting=csv.QUOTE_MINIMAL)
+            for toked_data in iter(self):
+                if header:
+                    writer.write_row(list(toked_data.keys()))
+                    header = False
+                writer.writerow(list(toked_data.values()))
+
+        self.already_tokenized = True
+        return
 
 
     def __len__(self):
@@ -169,7 +207,7 @@ class NLPDataset(Dataset):
 
     @staticmethod
     def preprocess_pipeline(df, text_col, tokenizer=None,
-                            pipeline_tasks=['num_words', 'num_sentences'], batch_size=50):
+                            pipeline_tasks=['num_words', 'num_sentences'], batch_size=500):
         strcol = text_col if isinstance(text_col, str) else '+'.join(text_col)
         if tokenizer is not None:
             tokenizer_tasks = list(set(pipeline_tasks).intersection(set(tokenizer.pipeline_tasks)))
