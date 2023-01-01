@@ -15,6 +15,8 @@ import spacy
 import numpy as np
 from joblib import Parallel, delayed
 from collections import defaultdict
+import gensim
+import gensim.downloader as api
 
 
 EMBED_DIR = "C:\\Users\\cfavr\\gensim-data\\"
@@ -134,7 +136,15 @@ class SpacyTokenizer(object):
         return [self.id2token[i] for i in topidx]
 
     ######### BATCH PROCESSING FUNCTIONS ###########
-    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences','global_embed_mean','global_embed_covariance'], batch_size=50):
+    def preprocess_pipeline(self, texts, pipeline_tasks=['num_words','num_sentences',
+                                                         'global_embed_mean','global_embed_covariance'], batch_size=50):
+        """
+        NEEDS MAJOR REWORKING...
+        1) Don't have it store docs... this was only done for calculating the covariance after the fact... instead
+        use a rolling covariance estimate
+        2) Expand out the pipeline tasks to incorporate entity extraction, if desired
+
+        """
         preproc_pipe = {k: [] for k in pipeline_tasks if 'global' not in k}
         if isinstance(texts,str):
             texts = [texts]
@@ -224,6 +234,155 @@ class SpacyTokenizer(object):
     def calc_global_embed_covariance(self):
         self.summary_statistics['global_embed_covariance'] = self.summary_statistics['global_embed_cov_sum']/(self.summary_statistics['global_word_count_total']-1)
 
+
+class DocProcessor(object):
+    """
+    Inputs spaCy "Doc" objects and runs various nlp-related functions, such as getting tokens, entities, counts
+    """
+    def __init__(self, nlp, return_values=['tokens','ents','tokens_excl_ents','tokens_replace_ents', 'ent_types',
+                'ent_count','token_count'], output_format='text', ent_dictionary=None):
+        self.nlp = nlp
+        self.return_values = [return_values] if isinstance(return_values,str) else return_values
+        self.func_map = {'tokens': self.get_tokens,
+                         'ents': self.get_ents,
+                         'tokens_excl_ents': self.get_tokens_excl_ents,
+                         'tokens_replace_ents': self.replace_ents_by_types,
+                         'ent_types': self.get_ent_types,
+                         'ent_count': self.ent_count,
+                         'token_count': self.token_count}
+
+        self.output_format = output_format
+        self.transform_values = ['tokens', 'tokens_excl_ents', 'tokens_replace_ents', 'ents']
+
+        # set up spacy-specific stuff
+        self.retrieve_spacy_model_parameters()
+        self.ent_dictionary = ent_dictionary
+        self.ent_set = set(ent_dictionary.token2id)
+
+    def __call__(self, doc):
+        return_values = self.return_values
+        if isinstance(doc,str):
+            doc = self.nlp(doc)
+
+        results = {}
+        if 'tokens' in return_values and self.output_format == 'vector_mean':
+            results['tokens'] = doc.vector
+            return_values = [v for v in return_values if v!='tokens']
+
+        if 'ents' in return_values and 'tokens_replace_ents' in return_values:
+            toks, ents = self.replace_ents_by_types(doc)
+            results['ents'] = ents
+            results['tokens_replace_ents'] = toks
+            return_values = [v for v in return_values if v not in ['ents','tokens_replace_ents']]
+            results['ents_text'] = ' '.join(results['ents'])
+
+        for value in return_values:
+            results[value] = self.func_map[value](doc)
+
+        for value in [v for v in results if v in self.transform_values and v != 'tokens']:
+            results[value] = self.transform_feats(results[value], value_type=value)
+        return results
+
+    ### OUTPUT TRANSFORMATION FUNCTIONS ###
+    def transform_feats(self, feats, value_type=None):
+        if value_type=='ents':
+            int_toks = set(self.ent_dictionary.token2id.keys())
+            if value_type == 'ents':  # for entities, return as bag of words, the dimension as the number of entities in the corpus
+                int_list = [self.ent_dictionary.token2id[tok] for tok in feats if tok in int_toks]
+                return int_list
+
+        ner_replace = {'NORP':'political', 'work_of_art':'artwork', 'GPE': 'geopolitical'}
+        output = [ner_replace[i] if i in ner_replace else i for i in feats]
+
+        if self.output_format == 'text':
+            return output
+        elif self.output_format == 'text-join':
+            return ' '.join(output)
+
+        #int_toks = set(self.ent_dictionary.token2id.keys()) if value_type=='ents' else set(self.token2id.keys())
+        #if value_type == 'ents':   # for entities, return as bag of words, the dimension as the number of entities in the corpus
+        #    int_list = [self.ent_dictionary.token2id[tok] for tok in output if tok in int_toks]
+        #    return int_list
+            #return self.convert_ints_to_bag_of_words(int_list)
+
+        if self.output_format in ['integer','bag_of_words']:
+            int_list = [self.token2id[tok] for tok in output if tok in self.token2id]
+            if self.output_format == 'bag_of_words':
+                return self.convert_ints_to_bag_of_words(int_list)
+            else:
+                return int_list
+        elif self.output_format in ['vector', 'vector_mean']:
+            vectors = [self.weights[self.token2id[tok]] for tok in output if tok in self.token2id]
+            if self.output_format == 'vector_mean':
+                return np.vstack(vectors).mean(axis=0)
+
+    def convert_ints_to_bag_of_words(self, int_list):
+        bow = np.zeros(self.vocab_size)
+        for int in int_list:
+            bow[int] += 1
+        return bow
+
+    def get_tokens(self, doc):
+        return [tok.lemma_ for tok in doc]
+
+    def replace_ents_by_types(self, doc, include_ents=True):
+        ents = [ent for ent in doc.ents if ent.lemma_ in self.ent_set]
+        next_ent = None if len(ents) == 0 else ents.pop(0)
+        return_ents = []
+        return_toks = []
+        for tok in doc:
+            if next_ent is not None:
+                if tok.i == next_ent.start:
+                    ent_text = next_ent.lemma_
+                    return_toks.append(tok.ent_type_)
+                    if ent_text not in return_ents:
+                        return_ents.append(ent_text)
+                    continue
+                elif next_ent.start < tok.i < next_ent.end:
+                    if tok.i == next_ent.end - 1:
+                        next_ent = None if len(ents) == 0 else ents.pop(0)
+                    continue
+            return_toks.append(tok.lemma_)
+        if include_ents:
+            return return_toks, return_ents
+
+    def get_ents(self, doc):
+        return [ent.lemma_ for ent in doc.ents if ent.lemma_ in self.ent_set]
+
+    def get_ent_types(self, doc):
+        return [doc[ent.start].ent_type_ for ent in doc.ents if ent in self.ent_set]
+
+    def get_tokens_excl_ents(self, doc, include_ents=False):
+        #rm_ents = list(filter(lambda x: x.ent_type==0, doc))
+        ents = self.get_ents(doc)
+        #rm_ents = list(filter(lambda x: x not in set(self.ent_dictionary.token2id), doc))
+        rm_ents = [tok.lemma_ for tok in doc if tok.lemma_ not in ents]
+        if include_ents:
+            return (rm_ents, ents)
+        else:
+            return rm_ents
+
+    def ent_count(self, doc):
+        return len(doc.ents)
+
+    def token_count(self, doc):
+        return len(doc)
+
+    def retrieve_spacy_model_parameters(self):
+        self.weights = torch.FloatTensor(self.nlp.vocab.vectors.data)
+
+        # Add in an additional row at the end of the weights matrix, for compatibility issues with torch.Embedding
+        self.weights = torch.cat((self.weights, torch.tensor(np.zeros((1, self.weights.shape[1])))))
+        self.token2hash = self.nlp.vocab.strings
+        self.token2id = {i: self.nlp.vocab.vectors.key2row[self.token2hash[i]] for i in list(self.nlp.vocab.strings)
+                         if self.token2hash[i] in self.nlp.vocab.vectors.key2row.keys()}
+        self.id2token = {self.nlp.vocab.vectors.key2row[self.token2hash[i]]: i for i in list(self.nlp.vocab.strings)
+                         if self.token2hash[i] in self.nlp.vocab.vectors.key2row.keys()}
+
+        self.raw_vocab_size = len(self.token2id)  # all possible tokens, regardless of if there's an embedding
+        self.vocab_size = max(self.token2id.values()) + 1
+        self.padding_value = self.vocab_size  # set padding to one more than the final index
+        self.vocab_size += 1  # add the padding value to the vocab size
 
 
 class GensimTokenizer(object):
