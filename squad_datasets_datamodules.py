@@ -28,7 +28,7 @@ import numpy as np
 import datasets
 import pytorch_lightning as pl
 from torch.utils.data import Dataset, DataLoader
-from squad_utilities import tokenize_to_dict, SpacyTokenizer, DocProcessor
+from squad_utilities import concat_text_cols, tokenize_to_dict, SpacyTokenizer, SpacyDocProcessor
 from itertools import chain
 import spacy
 import re
@@ -126,7 +126,7 @@ class EmotionsDataset(Dataset):
 
 
 class NLPDataset(Dataset):
-    def __init__(self, df, tokenizer, text_cols=[], sentence_len=128, negative_pads=False,
+    def __init__(self, df, tokenizer, text_cols=None, sentence_len=128, negative_pads=False,
                  sentence_separation=True, aggregate_by='row', separate_cols_on_return=True,
                  return_values=['tokens'], text_output_format='vector_mean',
                  active_pipes='all', pipeline_batch_size=500, token_dict_train=False, ent_dict_train=False,
@@ -157,7 +157,10 @@ class NLPDataset(Dataset):
 
         self.df = df
         self.tokenizer = tokenizer
-        self.text_cols = text_cols
+        if isinstance(text_cols, str):
+            self.text_cols = [text_cols]
+        else:
+            self.text_cols = text_cols if text_cols is not None else []
         self.sentence_len = sentence_len
         self.negative_pads = negative_pads
         self.sentence_separation = sentence_separation
@@ -182,7 +185,6 @@ class NLPDataset(Dataset):
         self.ent_dictionary = ent_dictionary
         self.setup()
 
-
     def retrieve_text(self, idx):
         if self.aggregate_by == 'row':
             example_row = self.df.iloc[idx]
@@ -195,7 +197,7 @@ class NLPDataset(Dataset):
                 text_cols = self.text_cols
 
             text = {}
-            for col in self.text_cols:
+            for col in text_cols:
                 if not isinstance(col,str):
                     colstr = '+'.join(col)
                     coltext = ' '.join([example_row[col] for col in col])
@@ -207,11 +209,14 @@ class NLPDataset(Dataset):
 
         else:
             ### retrieve the idx's specific to column
-            for col in self.idx_starts:
-                if self.idx_starts[col] > idx:
-                    break
-                else:
-                    text_col = col
+            idx_startlist = list(self.idx_starts)
+            text_col = idx_startlist[0]
+            if len(idx_startlist) > 1:
+                for col in idx_startlist[1:]:
+                    if self.idx_starts[col] > idx:
+                        break
+                    else:
+                        text_col = col
 
             if self.aggregate_by == 'column':
                 idx -= self.idx_starts[text_col]
@@ -229,7 +234,7 @@ class NLPDataset(Dataset):
             self.return_values = return_values
         if ent_dictionary is not None:
             self.ent_dictionary = ent_dictionary
-        self.doc_processor = DocProcessor(self.nlp, return_values=self.return_values, ent_dictionary=ent_dictionary)
+        self.doc_processor = SpacyDocProcessor(self.nlp, return_values=self.return_values, ent_dictionary=ent_dictionary)
 
     def __getitem__(self, idx):
         if self.already_tokenized:
@@ -238,23 +243,18 @@ class NLPDataset(Dataset):
         else:
             ### First retrieve the text block relative to the index.
             example = self.retrieve_text(idx) # returns dict of text_col names to the text... concatenation of multiple cols also returned
-
-            ### TOKENIZE
-            if self.run_tokenizer_on_output:
-                text_fields = [i for i in example.keys() if i in self.text_cols]
-                for text in text_fields:
-                    toked = tokenize_to_dict(self.tokenizer, example[text], self.sentence_len,
-                                            sentence_separation=True, text_label=text,
-                                             make_pad_negative=self.negative_pads, return_tokens_as_str=True)
-                                            # return_tokens_as_str will output the result as space-delimited integer tokens
-
-                    example.update(toked)
+            if not self.separate_cols_on_return:
+                text_cols = [tuple(chain(*[[col] if isinstance(col,str) else list(col) for col in self.text_cols]))]
+            else:
+                text_cols = self.text_cols
+            for text_col in {k:v for k,v in example.items() if k in text_cols}:
+                example.update(self.doc_processor(text_col))
 
                 ### If extracting by specific sentence
                 if self.aggregate_by == 'sentence':
                     ##!!!!!! NEED TO FIND THE GLOBAL IDX FOR THE SENTENCE
                     label = list(example.keys())[0].replace('_input_ids','')
-                    sents = example[text+'_input_ids'].split(' + ')
+                    sents = example[text_col+'_input_ids'].split(' + ')
                     text_col_idx_start = self.idx_starts[label]
                     df_idx = example['df_row_idx']
                     idx_start = self.df.iloc[df_idx][label+'_IDX_Start']
@@ -263,7 +263,7 @@ class NLPDataset(Dataset):
                     example = {'input_ids': sents[sent_ind], 'row_id': df_idx, 'sentence_id': idx, 'text_field': label}
             return example
 
-
+    """
     def __iter__(self):
         #for index, line in pd.DataFrame(self.df[self.text_col]).iterrows():
         if self.active_pipes != 'all':
@@ -289,6 +289,7 @@ class NLPDataset(Dataset):
         for idx in range(len(self)):
             toked = self[idx]
             yield toked
+    """
 
     def setup(self):
         #pipe_results = pd.DataFrame(iter(self))
@@ -302,7 +303,7 @@ class NLPDataset(Dataset):
         with open(self.processed_file, 'w') as csvfile:
             writer_ = csv.writer(csvfile, delimiter='\t',
                                 quotechar='|', quoting=csv.QUOTE_MINIMAL)
-            for toked_data in iter(self):
+            for toked_data in iter(self.process_pipeline):  #!!! 1/3/23 add in the SpacyProcessPipeline to this class
                 if header:
                     writer_.writerow(list(toked_data.keys()))
                     print(len(list(toked_data.values())))
@@ -392,15 +393,7 @@ class NLPDataset(Dataset):
 
     @staticmethod
     def concat_text_cols(df, text_cols, delimiter=' '):
-        if isinstance(text_cols,str):
-            return df[text_cols]
-        elif len(text_cols) == 1:
-            return df[text_cols[0]]
-        else:
-            return_col = df[text_cols[0]] + delimiter + df[text_cols[1]]
-            for col in text_cols[2:]:
-                return_col += df[col]
-            return return_col
+        return concat_text_cols(df, text_cols, delimiter)
 
     ### UNUSED ###
     def count_sentences(self, text_cols):
@@ -542,7 +535,6 @@ class NLPDataset_DEPRECATED(Dataset):
         for idx in range(len(self)):
             toked = self[idx]
             yield toked
-
 
     def setup(self):
         #pipe_results = pd.DataFrame(iter(self))
